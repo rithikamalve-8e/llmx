@@ -75,20 +75,21 @@ class LLMClient:
     # helper
     @staticmethod
     def _detect_provider() -> str:
-        if os.environ.get("OPENAI_API_KEY"):
-            return "openai"
+        from llmx.providers import PROVIDER_REGISTRY
+        import importlib
 
-        if os.environ.get("GROQ_API_KEY"):
-            return "groq"
+        for name, (module_path, class_name) in PROVIDER_REGISTRY.items():
+            module = importlib.import_module(module_path)
+            provider_cls = getattr(module, class_name)
 
-        if os.environ.get("GEMINI_API_KEY"):
-            return "gemini"
+            env_var = getattr(provider_cls, "env_var", None)
+            if env_var and os.environ.get(env_var):
+                return name
 
         raise EnvironmentError(
-            "No LLM provider detected. Set one of: OPENAI_API_KEY, GROQ_API_KEY, GEMINI_API_KEY\n"
+            "No LLM provider detected. Set the required API key for any provider\n"
             "Or pass provider explicitly."
         )
-
     @staticmethod
     def _to_request(
         prompt,

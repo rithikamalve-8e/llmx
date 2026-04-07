@@ -17,6 +17,7 @@ from llmx.providers.base import BaseProvider
 
 class OpenAIProvider(BaseProvider):
     name = "openai"
+    env_var="OPENAI_API_KEY"
 
     def __init__(
         self,

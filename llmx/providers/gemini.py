@@ -16,6 +16,7 @@ from llmx.providers.base import BaseProvider
 
 class GeminiProvider(BaseProvider):
     name = "gemini"
+    env_var="GEMINI_API_KEY"
 
     def __init__(self, api_key: str | None = None) -> None:
         try:

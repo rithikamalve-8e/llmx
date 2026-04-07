@@ -17,6 +17,7 @@ from llmx.providers.base import BaseProvider
 
 class GroqProvider(BaseProvider):
     name = "groq"
+    env_var="GROQ_API_KEY"
 
     def __init__(self, api_key: str | None = None)-> None:
         try:
