@@ -248,7 +248,6 @@ llmx/
 ## Limitations
 
 * No automatic fallback if a provider fails
-* Model defaults vary by provider
 * Tool calling support depends on provider
 
 ---
