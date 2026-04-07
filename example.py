@@ -29,7 +29,7 @@ messages = [
     Message(role="assistant", content="Nice to meet you, Rithika!"),
     Message(role="user", content="What's my name?"),
 ]
-response = client.generate(messages, system="You are a helpful assistant.") # an error is thrown here because no provider and model is given
+response = client.generate(messages, system="You are a helpful assistant.") # an error is thrown here because no provider and model is given, add provider and model name to continue.
 print(response.content)
 
 
