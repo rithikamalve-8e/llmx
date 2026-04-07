@@ -3,7 +3,7 @@ from dotenv import load_dotenv
 load_dotenv()
 from llmx import LLMClient, Message
 
-client = LLMClient()  
+client = LLMClient(provider="openai")  
 print(client)         
 
 
@@ -29,25 +29,29 @@ messages = [
     Message(role="assistant", content="Nice to meet you, Rithika!"),
     Message(role="user", content="What's my name?"),
 ]
-response = client.generate(messages, system="You are a helpful assistant.") # an error is thrown here because no provider and model is given, add provider and model name to continue.
+response = client.generate(
+    messages,
+    model="gpt-4o",
+    system="You are a helpful assistant."
+)
 print(response.content)
 
 
 # --- Streaming ---
-for chunk in client.stream("Count from 1 to 5 slowly."):
+for chunk in client.stream("Count from 1 to 5 slowly.", model="gpt-4o"):
     print(chunk.delta, end="", flush=True)
 print()
 
 
 # --- Explicit provider ---
 groq_client = LLMClient(provider="gemini")
-response = groq_client.generate("Hello from Groq!")
+response = groq_client.generate("Hello from Groq!", model="groq/compound-mini")
 print(response.content)
 
 
 # --- Switch provider on the fly ---
 gemini_client = client.use("gemini")
-response = gemini_client.generate("Hello from Gemini!")
+response = gemini_client.generate("Hello from Gemini!", model="gemini-1.5-flash")
 print(response.content)
 
 
@@ -68,7 +72,11 @@ tools = [
         },
     }
 ]
-response = client.generate("What's the weather in Tokyo?", tools=tools)
+response = client.generate(
+    "What's the weather in Tokyo?",
+    model="gpt-4o",
+    tools=tools
+)
 if response.tool_calls:
     tc = response.tool_calls[0]
     print(f"Tool: {tc.name}, Args: {tc.arguments}")
