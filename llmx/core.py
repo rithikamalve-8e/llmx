@@ -77,6 +77,7 @@ class LLMClient:
     def _detect_provider() -> str:
         from llmx.providers import PROVIDER_REGISTRY
         import importlib
+        import os
 
         for name, (module_path, class_name) in PROVIDER_REGISTRY.items():
             module = importlib.import_module(module_path)
@@ -87,8 +88,7 @@ class LLMClient:
                 return name
 
         raise EnvironmentError(
-            "No LLM provider detected. Set the required API key for any provider\n"
-            "Or pass provider explicitly."
+            "No LLM provider detected. Set any provider API key or pass provider explicitly."
         )
     @staticmethod
     def _to_request(
