@@ -10,19 +10,19 @@ from llmx.models import(
     StreamChunk
 )
 from llmx.providers.base import BaseProvider
-from llmx.providers import ENV_DETECTION_ORDER,load_provider
+from llmx.providers import load_provider
 
 
 class LLMClient:
     def __init__(self, provider: str | None = None, **provider_kwargs) -> None:
         name = provider or self._detect_provider()
         self._provider: BaseProvider = load_provider(name, **provider_kwargs)
-        self.provider_name:str = name
+        self.provider_name: str = name
 
     # public api
     def generate(
         self,
-        prompt: str | list[Message] |GenerateRequest,
+        prompt: str | list[Message] | GenerateRequest,
         *,
         model: str | None = None,
         system: str | None = None,
@@ -30,7 +30,7 @@ class LLMClient:
         max_tokens: int = 1024,
         tools: list[dict] | None = None,
         **extra,
-    )-> GenerateResponse:
+    ) -> GenerateResponse:
         request = self._to_request(
             prompt,
             model=model,
@@ -51,7 +51,7 @@ class LLMClient:
         temperature: float = 0.7,
         max_tokens: int = 1024,
         **extra,
-    )-> Iterator[StreamChunk]:
+    ) -> Iterator[StreamChunk]:
         request = self._to_request(
             prompt,
             model=model,
@@ -72,18 +72,21 @@ class LLMClient:
     def __repr__(self) -> str:
         return f"LLMClient(provider={self.provider_name!r})"
 
-    #helper
+    # helper
     @staticmethod
     def _detect_provider() -> str:
-        for env_var, provider_name in ENV_DETECTION_ORDER:
-            if os.environ.get(env_var):
-                return provider_name
-            else:
-                print(f"'{env_var}' not found in env, skipping '{provider_name}'...")
+        if os.environ.get("OPENAI_API_KEY"):
+            return "openai"
+
+        if os.environ.get("GROQ_API_KEY"):
+            return "groq"
+
+        if os.environ.get("GEMINI_API_KEY"):
+            return "gemini"
+
         raise EnvironmentError(
-            "No LLM provider detected. Set one of these environment variables: "
-            + ", ".join(ev for ev, _ in ENV_DETECTION_ORDER)
-            + "\nOr pass provider explicitly."
+            "No LLM provider detected. Set one of: OPENAI_API_KEY, GROQ_API_KEY, GEMINI_API_KEY\n"
+            "Or pass provider explicitly."
         )
 
     @staticmethod

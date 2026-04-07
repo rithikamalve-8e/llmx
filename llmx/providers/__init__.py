@@ -12,12 +12,6 @@ PROVIDER_REGISTRY: dict[str, tuple[str, str]] = {
     "gemini":  ("llmx.providers.gemini",  "GeminiProvider"),
 }
  
-#Env-var:provider name (checked in order)
-ENV_DETECTION_ORDER: list[tuple[str, str]] = [
-    ("OPENAI_API_KEY",  "openai"),
-    ("GROQ_API_KEY",    "groq"),
-    ("GEMINI_API_KEY",  "gemini"),
-]
  
  
 def load_provider(name: str, **kwargs) -> "BaseProvider":

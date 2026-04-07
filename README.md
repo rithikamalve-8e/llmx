@@ -20,7 +20,7 @@ GEMINI_API_KEY=AI...
 
 from dotenv import load_dotenv
 load_dotenv()
-from llmx import LLMClient
+from llmx import LLMClient3
 
 client = LLMClient()
 response = client.generate("Hello!")
