@@ -44,7 +44,7 @@ print()
 
 
 # --- Explicit provider ---
-groq_client = LLMClient(provider="gemini")
+groq_client = LLMClient(provider="groq")
 response = groq_client.generate("Hello from Groq!", model="groq/compound-mini")
 print(response.content)
 
