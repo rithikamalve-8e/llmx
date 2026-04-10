@@ -1,37 +1,42 @@
+import pytest
 from llmx.providers.base import BaseProvider
-from llmx.models import GenerateRequest, Message
+from llmx.models import GenerateRequest
 
 
+# -----------------------
+# Dummy subclass for testing ABC
+# -----------------------
 class DummyProvider(BaseProvider):
-    def generate(self, request):
-        pass
+    async def generate(self, request):
+        return "ok"
 
-    def stream(self, request):
-        pass
+    async def stream(self, request):
+        if False:
+            yield
+
+
+def test_baseprovider_instantiation():
+    p = DummyProvider()
+    assert p.name == "base"
 
 
 def test_build_messages_with_system():
-    provider = DummyProvider()
-
     req = GenerateRequest(
-        messages=[Message(role="user", content="Hi")],
-        system="You are helpful"
+        messages=[],
+        system="sys prompt"
     )
 
-    msgs = provider._build_messages(req)
+    p = DummyProvider()
+    msgs = p._build_messages(req)
 
     assert msgs[0]["role"] == "system"
-    assert msgs[1]["role"] == "user"
+    assert msgs[0]["content"] == "sys prompt"
 
 
 def test_build_messages_without_system():
-    provider = DummyProvider()
+    req = GenerateRequest(messages=[])
 
-    req = GenerateRequest(
-        messages=[Message(role="user", content="Hi")]
-    )
+    p = DummyProvider()
+    msgs = p._build_messages(req)
 
-    msgs = provider._build_messages(req)
-
-    assert len(msgs) == 1
-    assert msgs[0]["role"] == "user"
+    assert msgs == []

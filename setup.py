@@ -11,8 +11,8 @@ setup(
     extras_require={
         "openai":  ["openai"],
         "groq":    ["groq"],
-        "gemini":  ["google-generativeai"],
-        "all":     ["openai", "groq", "google-generativeai"],
+        "gemini":  ["google-genai"],
+        "all":     ["openai", "groq", "google-genai"],
     },
     include_package_data=True,
 )

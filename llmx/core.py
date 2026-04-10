@@ -1,13 +1,17 @@
-#imports
 from __future__ import annotations
-import os
-from typing import Iterator
 
-from llmx.models import(
+import os
+import asyncio
+import logging
+from typing import Iterator, AsyncIterator
+
+logger = logging.getLogger(__name__)
+
+from llmx.models import (
     GenerateRequest,
     GenerateResponse,
     Message,
-    StreamChunk
+    StreamChunk,
 )
 from llmx.providers.base import BaseProvider
 from llmx.providers import load_provider
@@ -19,7 +23,8 @@ class LLMClient:
         self._provider: BaseProvider = load_provider(name, **provider_kwargs)
         self.provider_name: str = name
 
-    # public api
+    # sync
+
     def generate(
         self,
         prompt: str | list[Message] | GenerateRequest,
@@ -31,16 +36,17 @@ class LLMClient:
         tools: list[dict] | None = None,
         **extra,
     ) -> GenerateResponse:
-        request = self._to_request(
-            prompt,
-            model=model,
-            system=system,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            tools=tools,
-            extra=extra,
+        return asyncio.run(
+            self.agenerate(
+                prompt,
+                model=model,
+                system=system,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                tools=tools,
+                **extra,
+            )
         )
-        return self._provider.generate(request)
 
     def stream(
         self,
@@ -52,15 +58,95 @@ class LLMClient:
         max_tokens: int = 1024,
         **extra,
     ) -> Iterator[StreamChunk]:
-        request = self._to_request(
-            prompt,
-            model=model,
-            system=system,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            extra=extra,
-        )
-        return self._provider.stream(request)
+
+        async def _runner():
+            return [
+                chunk
+                async for chunk in self.astream(
+                    prompt,
+                    model=model,
+                    system=system,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    **extra,
+                )
+            ]
+
+        return iter(asyncio.run(_runner()))
+
+    # async
+
+    async def agenerate(
+        self,
+        prompt: str | list[Message] | GenerateRequest,
+        *,
+        model: str | None = None,
+        system: str | None = None,
+        temperature: float = 0.7,
+        max_tokens: int = 1024,
+        tools: list[dict] | None = None,
+        **extra,
+    ) -> GenerateResponse:
+        try:
+            request = self._to_request(
+                prompt,
+                model=model,
+                system=system,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                tools=tools,
+                extra=extra,
+            )
+
+            result = self._provider.generate(request)
+
+            if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
+                return await result
+
+            return result
+
+        except (TypeError, ValueError):
+            logger.exception("Invalid input to generate")
+            raise
+        except Exception as e:
+            logger.exception("Provider generate failed")
+            raise RuntimeError("LLM generation failed") from e
+
+    async def astream(
+        self,
+        prompt: str | list[Message] | GenerateRequest,
+        *,
+        model: str | None = None,
+        system: str | None = None,
+        temperature: float = 0.7,
+        max_tokens: int = 1024,
+        **extra,
+    ) -> AsyncIterator[StreamChunk]:
+        try:
+            request = self._to_request(
+                prompt,
+                model=model,
+                system=system,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                extra=extra,
+            )
+
+            stream = self._provider.stream(request)
+
+            if hasattr(stream, "__aiter__"):
+                async for chunk in stream:
+                    yield chunk
+            else:
+                for chunk in stream:
+                    yield chunk
+
+        except (TypeError, ValueError):
+            logger.exception("Invalid input to stream")
+            raise
+        except Exception as e:
+            logger.exception("Provider stream failed")
+            raise RuntimeError("LLM streaming failed") from e
 
     @property
     def provider(self) -> BaseProvider:
@@ -73,11 +159,11 @@ class LLMClient:
         return f"LLMClient(provider={self.provider_name!r})"
 
     # helper
+
     @staticmethod
     def _detect_provider() -> str:
         from llmx.providers import PROVIDER_REGISTRY
         import importlib
-        import os
 
         for name, (module_path, class_name) in PROVIDER_REGISTRY.items():
             module = importlib.import_module(module_path)
@@ -90,6 +176,7 @@ class LLMClient:
         raise EnvironmentError(
             "No LLM provider detected. Set any provider API key or pass provider explicitly."
         )
+
     @staticmethod
     def _to_request(
         prompt,

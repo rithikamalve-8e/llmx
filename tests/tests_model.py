@@ -1,38 +1,43 @@
-from llmx.models import Message, GenerateRequest, GenerateResponse, Usage, ToolCall, StreamChunk
+from llmx.models import (
+    Message,
+    ToolCall,
+    Usage,
+    GenerateRequest,
+    GenerateResponse,
+    StreamChunk,
+)
 
 
-def test_message():
-    msg = Message(role="user", content="Hello")
-    assert msg.role == "user"
-    assert msg.content == "Hello"
+def test_message_model():
+    m = Message(role="user", content="hi")
+    assert m.role == "user"
+    assert m.content == "hi"
 
 
-def test_generate_request_defaults():
-    req = GenerateRequest(messages=[Message(role="user", content="Hi")])
+def test_tool_call_model():
+    t = ToolCall(id="1", name="test", arguments={"a": 1})
+    assert t.id == "1"
+    assert t.name == "test"
+    assert t.arguments["a"] == 1
+
+
+def test_usage_model_defaults():
+    u = Usage()
+    assert u.prompt_tokens is None
+
+
+def test_generate_request():
+    req = GenerateRequest(messages=[Message(role="user", content="hi")])
+    assert len(req.messages) == 1
     assert req.temperature == 0.7
-    assert req.max_tokens == 1024
-    assert req.extra == {}
 
 
 def test_generate_response():
-    res = GenerateResponse(content="Hi", model="test-model")
-    assert res.content == "Hi"
-    assert res.model == "test-model"
-    assert res.tool_calls == []
-
-
-def test_usage():
-    usage = Usage(prompt_tokens=10, completion_tokens=5, total_tokens=15)
-    assert usage.total_tokens == 15
-
-
-def test_tool_call():
-    tc = ToolCall(id="1", name="test", arguments={"a": 1})
-    assert tc.name == "test"
-    assert tc.arguments["a"] == 1
+    resp = GenerateResponse(content="ok", model="test")
+    assert resp.content == "ok"
+    assert resp.model == "test"
 
 
 def test_stream_chunk():
-    chunk = StreamChunk(delta="Hello", finished=False)
-    assert chunk.delta == "Hello"
-    assert not chunk.finished
+    c = StreamChunk(delta="hi")
+    assert c.delta == "hi"

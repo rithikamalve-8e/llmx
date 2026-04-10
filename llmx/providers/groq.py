@@ -12,7 +12,10 @@ from llmx.models import (
 )
 from llmx.providers.base import BaseProvider
 
+import logging
+import asyncio
 
+logger = logging.getLogger(__name__)
 
 
 class GroqProvider(BaseProvider):
@@ -29,24 +32,38 @@ class GroqProvider(BaseProvider):
 
     #core
 
-    def generate(self, request: GenerateRequest)-> GenerateResponse:
-        kwargs = self._build_kwargs(request, stream=False)
-        resp = self._client.chat.completions.create(**kwargs)
-        return self._normalize(resp)
+    async def generate(self, request: GenerateRequest) -> GenerateResponse:
+        try:
+            kwargs = self._build_kwargs(request, stream=False)
+            resp = await asyncio.to_thread(
+                self._client.chat.completions.create, **kwargs
+            )
+            return self._normalize(resp)
+        except Exception as e:
+            logger.exception("Groq generate failed")
+            raise RuntimeError("Groq generation failed") from e
 
-    def stream(self, request: GenerateRequest)-> Iterator[StreamChunk]:
+    async def stream(self, request: GenerateRequest):
         kwargs = self._build_kwargs(request, stream=True)
 
-        for chunk in self._client.chat.completions.create(**kwargs):
-            delta = chunk.choices[0].delta.content or ""
-            finished = chunk.choices[0].finish_reason is not None
-
-            yield StreamChunk(
-                delta=delta,
-                finished=finished,
-                model=chunk.model,
-                raw=chunk,
+        try:
+            stream = await asyncio.to_thread(
+                self._client.chat.completions.create, **kwargs
             )
+
+            for chunk in stream:
+                delta = chunk.choices[0].delta.content or ""
+                finished = chunk.choices[0].finish_reason is not None
+
+                yield StreamChunk(
+                    delta=delta,
+                    finished=finished,
+                    model=chunk.model,
+                    raw=chunk,
+                )
+        except Exception as e:
+            logger.exception("Groq stream failed")
+            raise RuntimeError("Groq streaming failed") from e
 
     #helpers
 

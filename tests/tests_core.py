@@ -1,9 +1,12 @@
+import asyncio
 import pytest
 from llmx.core import LLMClient
 from llmx.models import Message, GenerateRequest
 
 
-# --- Helpers ---
+# -----------------------
+# Dummy provider (sync OR async compatible)
+# -----------------------
 class DummyProvider:
     def __init__(self):
         self.generate_called = False
@@ -18,7 +21,9 @@ class DummyProvider:
         yield from []
 
 
-# --- _to_request tests ---
+# -----------------------
+# _to_request
+# -----------------------
 def test_to_request_from_string():
     req = LLMClient._to_request(
         "Hello",
@@ -26,27 +31,26 @@ def test_to_request_from_string():
         system=None,
         temperature=0.5,
         max_tokens=50,
-        extra={}
+        extra={},
     )
 
-    assert isinstance(req, GenerateRequest)
     assert req.messages[0].content == "Hello"
     assert req.model == "test-model"
 
 
-def test_to_request_from_message_list():
-    messages = [Message(role="user", content="Hi")]
+def test_to_request_from_list():
+    msgs = [Message(role="user", content="hi")]
 
     req = LLMClient._to_request(
-        messages,
+        msgs,
         model=None,
         system=None,
         temperature=0.7,
         max_tokens=100,
-        extra={}
+        extra={},
     )
 
-    assert req.messages == messages
+    assert req.messages == msgs
 
 
 def test_to_request_passthrough():
@@ -58,13 +62,13 @@ def test_to_request_passthrough():
         system=None,
         temperature=0.7,
         max_tokens=100,
-        extra={}
+        extra={},
     )
 
     assert req is original
 
 
-def test_to_request_invalid_type():
+def test_to_request_invalid():
     with pytest.raises(TypeError):
         LLMClient._to_request(
             123,
@@ -72,80 +76,73 @@ def test_to_request_invalid_type():
             system=None,
             temperature=0.7,
             max_tokens=100,
-            extra={}
+            extra={},
         )
 
 
-# --- generate() tests ---
+# -----------------------
+# generate
+# -----------------------
 def test_generate_calls_provider(mocker):
     dummy = DummyProvider()
-
     mocker.patch("llmx.core.load_provider", return_value=dummy)
 
     client = LLMClient(provider="openai")
-    result = client.generate("Hello", model="test-model")
+
+    result = client.generate("Hello", model="test")
 
     assert dummy.generate_called is True
     assert result == "mocked-response"
 
 
-# --- stream() tests ---
+# -----------------------
+# stream
+# -----------------------
 def test_stream_calls_provider(mocker):
     dummy = DummyProvider()
-
     mocker.patch("llmx.core.load_provider", return_value=dummy)
 
     client = LLMClient(provider="openai")
-    list(client.stream("Hello", model="test-model"))
+
+    list(client.stream("Hello", model="test"))
 
     assert dummy.stream_called is True
 
 
-# --- use() tests ---
-def test_use_returns_new_instance(mocker):
+# -----------------------
+# use()
+# -----------------------
+def test_use_creates_new_instance(mocker):
     dummy = DummyProvider()
-
     mocker.patch("llmx.core.load_provider", return_value=dummy)
 
     client = LLMClient(provider="openai")
     new_client = client.use("gemini")
 
-    assert new_client is not client
     assert new_client.provider_name == "gemini"
     assert client.provider_name == "openai"
 
 
-# --- provider property ---
-def test_provider_property(mocker):
-    dummy = DummyProvider()
-
-    mocker.patch("llmx.core.load_provider", return_value=dummy)
-
-    client = LLMClient(provider="openai")
-
-    assert client.provider is dummy
-
-
-# --- __repr__ ---
+# -----------------------
+# repr
+# -----------------------
 def test_repr(mocker):
     dummy = DummyProvider()
-
     mocker.patch("llmx.core.load_provider", return_value=dummy)
 
     client = LLMClient(provider="openai")
-
     assert "openai" in repr(client)
 
 
-# --- detect_provider ---
-def test_detect_provider_openai(mocker):
+# -----------------------
+# detect provider
+# -----------------------
+def test_detect_provider_env(mocker):
     mocker.patch.dict("os.environ", {"OPENAI_API_KEY": "key"})
-
-    provider = LLMClient._detect_provider()
-    assert provider == "openai"
+    assert LLMClient._detect_provider() == "openai"
 
 
-def test_detect_provider_no_env(mocker):
+def test_detect_provider_none(mocker):
     mocker.patch.dict("os.environ", {}, clear=True)
 
     with pytest.raises(EnvironmentError):

@@ -11,8 +11,10 @@ from llmx.models import (
 )
 from llmx.providers.base import BaseProvider
 
+import logging
+import asyncio
 
-
+logger = logging.getLogger(__name__)
 
 class GeminiProvider(BaseProvider):
     name = "gemini"
@@ -29,26 +31,45 @@ class GeminiProvider(BaseProvider):
 
     #core
 
-    def generate(self, request: GenerateRequest) -> GenerateResponse:
-        model_name, contents, config = self._prepare(request)
-        resp = self._client.models.generate_content(
-            model=model_name,
-            contents=contents,
-            config=config,
-        )
-        return self._normalize(resp, model_name)
+    async def generate(self, request: GenerateRequest) -> GenerateResponse:
+        try:
+            model_name, contents, config = self._prepare(request)
 
-    def stream(self, request: GenerateRequest) -> Iterator[StreamChunk]:
-        model_name, contents, config = self._prepare(request)
-        for chunk in self._client.models.generate_content_stream(
-            model=model_name,
-            contents=contents,
-            config=config,
-        ):
-            text = chunk.text if hasattr(chunk, "text") and chunk.text else ""
-            yield StreamChunk(delta=text, raw=chunk)
+            resp = await asyncio.to_thread(
+                self._client.models.generate_content,
+                model=model_name,
+                contents=contents,
+                config=config,
+            )
 
-        yield StreamChunk(delta="", finished=True)
+            return self._normalize(resp, model_name)
+        except ValueError:
+            logger.exception("Invalid Gemini request")
+            raise
+        except Exception as e:
+            logger.exception("Gemini generate failed")
+            raise RuntimeError("Gemini generation failed") from e
+
+    async def stream(self, request: GenerateRequest)->AsyncIterator[StreamChunk]:
+        try:
+            model_name, contents, config = self._prepare(request)
+
+            stream = await asyncio.to_thread(
+                self._client.models.generate_content_stream,
+                model=model_name,
+                contents=contents,
+                config=config,
+            )
+
+            for chunk in stream:
+                text = chunk.text if hasattr(chunk, "text") and chunk.text else ""
+                yield StreamChunk(delta=text, raw=chunk)
+
+            yield StreamChunk(delta="", finished=True)
+
+        except Exception as e:
+            logger.exception("Gemini stream failed")
+            raise RuntimeError("Gemini streaming failed") from e
 
     # helpers
 
