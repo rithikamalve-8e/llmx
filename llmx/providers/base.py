@@ -28,7 +28,7 @@ class BaseProvider(ABC):
     def stream(self, request: GenerateRequest) -> Iterator[StreamChunk] | AsyncIterator[StreamChunk]:
         pass
 
-    # retry helper
+    #retry helper
 
     async def _retry_with_backoff(
         self,
@@ -37,29 +37,34 @@ class BaseProvider(ABC):
         retries: int = 3,
         base_delay: float = 1.0,
         max_delay: float = 10.0,
+        timeout: float = 30.0,
         retry_exceptions: Tuple[Type[Exception], ...] = (TimeoutError, ConnectionError),
     ):
         last_exc: Exception | None = None
 
         for attempt in range(retries):
             try:
-                return await fn()
+                return await asyncio.wait_for(fn(), timeout=timeout)
+
             except retry_exceptions as e:
                 last_exc = e
 
-                if attempt == retries - 1:
-                    logger.exception("Max retries reached")
-                    raise
+            except asyncio.TimeoutError as e:
+                last_exc = e
 
-                delay = min(base_delay * (2 ** attempt), max_delay)
+            if attempt == retries - 1:
+                logger.exception("Max retries reached")
+                raise last_exc
 
-                logger.warning(
-                    f"Retrying in {delay:.2f}s (attempt {attempt + 1}/{retries}) due to: {e}"
-                )
+            delay = min(base_delay * (2 ** attempt), max_delay)
 
-                await asyncio.sleep(delay)
+            logger.warning(
+                f"Retrying in {delay:.2f}s (attempt {attempt + 1}/{retries}) due to: {last_exc}"
+            )
 
-        if last_exc:
+            await asyncio.sleep(delay)
+
+        if last_exc:  # pragma: no cover
             raise last_exc
 
     # helpers
