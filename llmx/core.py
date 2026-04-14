@@ -163,11 +163,13 @@ class LLMClient:
         return f"LLMClient(provider={self.provider_name!r})"
 
     # helper
-
+    from dotenv import load_dotenv
+    load_dotenv()
     @staticmethod
     def _detect_provider() -> str:
         from llmx.providers import PROVIDER_REGISTRY
         import importlib
+        
 
         for name, (module_path, class_name) in PROVIDER_REGISTRY.items():
             module = importlib.import_module(module_path)

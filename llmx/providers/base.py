@@ -64,9 +64,6 @@ class BaseProvider(ABC):
 
             await asyncio.sleep(delay)
 
-        if last_exc:  # pragma: no cover
-            raise last_exc
-
     # helpers
 
     def _build_messages(self, request: GenerateRequest) -> list[dict]:
