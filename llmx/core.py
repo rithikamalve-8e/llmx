@@ -16,6 +16,7 @@ from llmx.models import (
 from llmx.providers.base import BaseProvider
 from llmx.providers import load_provider
 from aiolimiter import AsyncLimiter
+import weakref
 
 
 class LLMClient:
@@ -23,7 +24,7 @@ class LLMClient:
         name = provider or self._detect_provider()
         self._provider: BaseProvider = load_provider(name, **provider_kwargs)
         self.provider_name: str = name
-        self._limiters: dict = {}
+        self._limiters: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 
     def _get_limiter(self) -> AsyncLimiter:
         try:
