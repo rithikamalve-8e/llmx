@@ -23,7 +23,10 @@ class LLMClient:
         name = provider or self._detect_provider()
         self._provider: BaseProvider = load_provider(name, **provider_kwargs)
         self.provider_name: str = name
-        self._limiter = AsyncLimiter(10, 1)  # 10 requests per second
+        self._limiter: AsyncLimiter | None = None
+
+    def _get_limiter(self) -> AsyncLimiter:
+        return AsyncLimiter(10, 1)
 
     # sync
 
@@ -100,7 +103,7 @@ class LLMClient:
                 extra=extra,
             )
 
-            await self._limiter.acquire()
+            await self._get_limiter().acquire()
             result = self._provider.generate(request)
 
             if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
@@ -135,7 +138,7 @@ class LLMClient:
                 extra=extra,
             )
 
-            await self._limiter.acquire()
+            await self._get_limiter().acquire()
             stream = self._provider.stream(request)
 
             if hasattr(stream, "__aiter__"):
