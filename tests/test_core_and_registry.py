@@ -7,10 +7,7 @@ Strategy: mock provider __init__ to bypass SDK; test the real LLMClient logic.
 from __future__ import annotations
 
 import asyncio
-import os
-import sys
-from unittest.mock import AsyncMock, MagicMock, patch
-import importlib
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -23,6 +20,14 @@ from llmx.models import (
     Usage,
 )
 from llmx.providers import load_provider, PROVIDER_REGISTRY
+from llmx.config import LLMClientConfig
+from llmx.exceptions import (
+    InvalidRequestError,
+    LLMXError,
+    NoProviderError,
+    AmbiguousProviderError,
+)
+from llmx.providers import resolve_provider
 
 
 # ===========================================================================
@@ -44,9 +49,11 @@ PROVIDER_CLASS_NAMES = {
     "gemini": "GeminiProvider",
 }
 
-def _make_client(provider="openai"):
+def _make_client(provider="openai", config=None):
     class_name = PROVIDER_CLASS_NAMES[provider]
     with patch(f"llmx.providers.{provider}.{class_name}.__init__", return_value=None):
+        if config is not None:
+            return LLMClient(provider=provider, config=config)
         return LLMClient(provider=provider)
 
 
@@ -120,7 +127,13 @@ class TestProviderRegistry:
     def test_load_passes_kwargs_to_constructor(self):
         with patch("llmx.providers.openai.OpenAIProvider.__init__", return_value=None) as mock_init:
             load_provider("openai", api_key="sk-test", base_url="http://x")
-        mock_init.assert_called_once_with(api_key="sk-test", base_url="http://x")
+        mock_init.assert_called_once_with(config=None, api_key="sk-test", base_url="http://x")
+
+    def test_load_passes_config_to_constructor(self):
+        cfg = LLMClientConfig(max_retries=5)
+        with patch("llmx.providers.openai.OpenAIProvider.__init__", return_value=None) as mock_init:
+            load_provider("openai", config=cfg)
+        mock_init.assert_called_once_with(config=cfg)
 
 
 # ===========================================================================
@@ -149,62 +162,100 @@ class TestPublicAPI:
         )
         assert all([Message, GenerateRequest, GenerateResponse, StreamChunk, ToolCall, Usage])
 
+    def test_exceptions_importable(self):
+        from llmx import (
+            LLMXError, AuthenticationError, RateLimitError,
+            ProviderUnavailableError, InvalidRequestError,
+            NoProviderError, AmbiguousProviderError,
+        )
+        assert all([LLMXError, AuthenticationError, RateLimitError,
+                    ProviderUnavailableError, InvalidRequestError,
+                    NoProviderError, AmbiguousProviderError])
+
+    def test_llmclientconfig_importable(self):
+        from llmx import LLMClientConfig
+        assert LLMClientConfig is not None
+
 
 # ===========================================================================
-# LLMClient — _detect_provider
+# providers/__init__.py — resolve_provider
 # ===========================================================================
 
-class TestDetectProvider:
+class TestResolveProvider:
 
-    def _clean_env(self):
-        return {k: v for k, v in os.environ.items()
-                if k not in ("OPENAI_API_KEY", "GROQ_API_KEY", "GEMINI_API_KEY")}
+    def test_resolves_gpt_model_to_openai(self):
+        with patch("llmx.providers.openai.OpenAIProvider.__init__", return_value=None):
+            p = resolve_provider("gpt-4o")
+        from llmx.providers.openai import OpenAIProvider
+        assert isinstance(p, OpenAIProvider)
 
-    def test_detects_openai(self):
-        with patch.dict(os.environ, {**self._clean_env(), "OPENAI_API_KEY": "sk-x"}, clear=True):
-            with patch.dict("llmx.providers.PROVIDER_REGISTRY",
-                            {"openai": PROVIDER_REGISTRY["openai"]}, clear=True):
-                name = LLMClient._detect_provider()
-        assert name == "openai"
+    def test_resolves_gemini_model_to_gemini(self):
+        with patch("llmx.providers.gemini.GeminiProvider.__init__", return_value=None):
+            p = resolve_provider("gemini-1.5-pro")
+        from llmx.providers.gemini import GeminiProvider
+        assert isinstance(p, GeminiProvider)
 
-    def test_detects_groq(self):
-        with patch.dict(os.environ, {**self._clean_env(), "GROQ_API_KEY": "gsk-x"}, clear=True):
-            with patch.dict("llmx.providers.PROVIDER_REGISTRY",
-                            {"groq": PROVIDER_REGISTRY["groq"]}, clear=True):
-                name = LLMClient._detect_provider()
-        assert name == "groq"
+    def test_resolves_llama_model_to_groq(self):
+        with patch("llmx.providers.groq.GroqProvider.__init__", return_value=None):
+            p = resolve_provider("llama-3.1-70b-versatile")
+        from llmx.providers.groq import GroqProvider
+        assert isinstance(p, GroqProvider)
 
-    def test_detects_gemini(self):
-        with patch.dict(os.environ, {**self._clean_env(), "GEMINI_API_KEY": "gai-x"}, clear=True):
-            with patch.dict("llmx.providers.PROVIDER_REGISTRY",
-                            {"gemini": PROVIDER_REGISTRY["gemini"]}, clear=True):
-                name = LLMClient._detect_provider()
-        assert name == "gemini"
+    def test_resolves_mixtral_to_groq(self):
+        with patch("llmx.providers.groq.GroqProvider.__init__", return_value=None):
+            p = resolve_provider("mixtral-8x7b-32768")
+        from llmx.providers.groq import GroqProvider
+        assert isinstance(p, GroqProvider)
 
-    def test_raises_when_no_key_set(self):
-        with patch.dict(os.environ, self._clean_env(), clear=True):
-            with pytest.raises(EnvironmentError, match="No LLM provider detected"):
-                LLMClient._detect_provider()
+    def test_resolves_o1_to_openai(self):
+        with patch("llmx.providers.openai.OpenAIProvider.__init__", return_value=None):
+            p = resolve_provider("o1-mini")
+        from llmx.providers.openai import OpenAIProvider
+        assert isinstance(p, OpenAIProvider)
 
-    def test_provider_with_no_env_var_attr_skipped(self):
-        fake_cls = MagicMock(spec=[])  # no env_var attr → skipped cleanly
-        real_import = importlib.import_module
+    def test_raises_no_provider_error_for_unknown_model(self):
+        with pytest.raises(NoProviderError, match="No registered provider"):
+            resolve_provider("unknown-model-xyz-999")
 
-        def selective_import(name):
-            mod = real_import(name)
-            if name == "llmx.providers.openai":
-                fake_mod = MagicMock()
-                fake_mod.OpenAIProvider = fake_cls
-                return fake_mod
-            return mod
+    def test_no_provider_error_mentions_available(self):
+        with pytest.raises(NoProviderError) as exc_info:
+            resolve_provider("unknown-model-xyz-999")
+        assert "openai" in str(exc_info.value)
 
-        fake_registry = {"fake": ("llmx.providers.openai", "OpenAIProvider")}
+    def test_raises_ambiguous_provider_error_on_multi_match(self):
+        from llmx.providers.openai import OpenAIProvider
+        from llmx.providers.groq import GroqProvider
+        from llmx.providers.gemini import GeminiProvider
 
-        with patch.dict(os.environ, self._clean_env(), clear=True):
-            with patch("importlib.import_module", side_effect=selective_import):
-                with patch.dict("llmx.providers.PROVIDER_REGISTRY", fake_registry, clear=True):
-                    with pytest.raises(EnvironmentError):
-                        LLMClient._detect_provider()
+        with patch.object(OpenAIProvider, "supports_model", return_value=True), \
+             patch.object(GroqProvider, "supports_model", return_value=True), \
+             patch.object(GeminiProvider, "supports_model", return_value=False):
+            with pytest.raises(AmbiguousProviderError, match="Multiple providers"):
+                resolve_provider("ambiguous-model")
+
+    def test_ambiguous_error_names_conflicting_providers(self):
+        from llmx.providers.openai import OpenAIProvider
+        from llmx.providers.groq import GroqProvider
+        from llmx.providers.gemini import GeminiProvider
+
+        with patch.object(OpenAIProvider, "supports_model", return_value=True), \
+             patch.object(GroqProvider, "supports_model", return_value=True), \
+             patch.object(GeminiProvider, "supports_model", return_value=False):
+            with pytest.raises(AmbiguousProviderError) as exc_info:
+                resolve_provider("ambiguous-model")
+        msg = str(exc_info.value)
+        assert "openai" in msg and "groq" in msg
+
+    def test_resolve_passes_config_to_provider(self):
+        cfg = LLMClientConfig(max_retries=9)
+        with patch("llmx.providers.openai.OpenAIProvider.__init__", return_value=None) as mock_init:
+            resolve_provider("gpt-4o", config=cfg)
+        mock_init.assert_called_once_with(config=cfg)
+
+    def test_resolve_passes_kwargs_to_provider(self):
+        with patch("llmx.providers.openai.OpenAIProvider.__init__", return_value=None) as mock_init:
+            resolve_provider("gpt-4o", api_key="sk-test")
+        mock_init.assert_called_once_with(config=None, api_key="sk-test")
 
 
 # ===========================================================================
@@ -302,9 +353,24 @@ class TestToRequest:
         )
         assert req.extra == {}
 
+    def test_invalid_request_raises_invalid_request_error(self):
+        """validate() is called in _to_request; bad params raise InvalidRequestError."""
+        with pytest.raises(InvalidRequestError):
+            LLMClient._to_request(
+                "hi", model=None, system=None,
+                temperature=99.0, max_tokens=1024, extra={},
+            )
+
+    def test_invalid_max_tokens_raises_invalid_request_error(self):
+        with pytest.raises(InvalidRequestError):
+            LLMClient._to_request(
+                "hi", model=None, system=None,
+                temperature=0.7, max_tokens=0, extra={},
+            )
+
 
 # ===========================================================================
-# LLMClient — init, repr, properties
+# LLMClient — init, repr, properties, config
 # ===========================================================================
 
 class TestLLMClientInit:
@@ -327,15 +393,11 @@ class TestLLMClientInit:
             c2 = c1.use("groq")
         assert c2 is not c1
         assert c2.provider_name == "groq"
-    
-    def test_get_limiter_reuses_same_loop(self):
+
+    def test_limiter_created_at_init(self):
+        from aiolimiter import AsyncLimiter
         c = _make_client()
-        async def get_twice():
-            l1 = c._get_limiter()
-            l2 = c._get_limiter()
-            return l1, l2
-        l1, l2 = asyncio.run(get_twice())
-        assert l1 is l2
+        assert isinstance(c._limiter, AsyncLimiter)
 
     def test_use_does_not_mutate_original(self):
         c1 = _make_client("openai")
@@ -347,7 +409,97 @@ class TestLLMClientInit:
         c1 = _make_client("openai")
         with patch("llmx.providers.groq.GroqProvider.__init__", return_value=None) as mock_init:
             c1.use("groq", api_key="test")
-        mock_init.assert_called_once_with(api_key="test")
+        mock_init.assert_called_once_with(config=ANY, api_key="test")
+
+    def test_accepts_config_parameter(self):
+        cfg = LLMClientConfig(max_retries=5, rate_limit=20)
+        c = _make_client(config=cfg)
+        assert c.config is cfg
+
+    def test_defaults_to_llmclientconfig_when_no_config(self):
+        c = _make_client()
+        assert isinstance(c.config, LLMClientConfig)
+
+    def test_default_config_has_expected_defaults(self):
+        c = _make_client()
+        assert c.config.rate_limit == 10
+        assert c.config.rate_limit_period == 1.0
+        assert c.config.max_retries == 3
+
+    def test_limiter_uses_config_rate_limit(self):
+        cfg = LLMClientConfig(rate_limit=5, rate_limit_period=2.0)
+        c = _make_client(config=cfg)
+        assert c._limiter.max_rate == 5
+
+    def test_limiter_uses_config_rate_limit_period(self):
+        cfg = LLMClientConfig(rate_limit=15, rate_limit_period=3.0)
+        c = _make_client(config=cfg)
+        assert c._limiter.time_period == 3.0
+
+    def test_config_forwarded_to_provider_on_init(self):
+        cfg = LLMClientConfig(max_retries=7)
+        with patch("llmx.providers.openai.OpenAIProvider.__init__", return_value=None) as mock_init:
+            LLMClient(provider="openai", config=cfg)
+        mock_init.assert_called_once_with(config=cfg)
+
+    def test_provider_none_allowed_at_init(self):
+        c = LLMClient(provider=None)
+        assert c._provider is None
+        assert c.provider_name is None
+
+    def test_provider_none_repr(self):
+        c = LLMClient(provider=None)
+        assert repr(c) == "LLMClient(provider=None)"
+
+    def test_explicit_provider_overrides_resolver(self):
+        c = _make_client("openai")
+        assert c._provider is not None
+        assert c.provider_name == "openai"
+
+    def test_resolve_returns_explicit_provider_regardless_of_model(self):
+        c = _make_client("openai")
+        resolved = c._resolve(None)
+        assert resolved is c._provider
+
+    def test_resolve_raises_value_error_when_no_provider_and_no_model(self):
+        c = LLMClient(provider=None)
+        with pytest.raises(ValueError, match="model must be specified"):
+            c._resolve(None)
+
+    def test_resolve_calls_resolve_provider_for_unknown_provider(self):
+        c = LLMClient(provider=None)
+        mock_provider = MagicMock()
+        with patch("llmx.core.LLMClient._resolve", return_value=mock_provider):
+            resolved = c._resolve("gpt-4o")
+        assert resolved is mock_provider
+
+    def test_resolver_caches_resolved_provider(self):
+        c = LLMClient(provider=None)
+        mock_provider = MagicMock()
+        with patch("llmx.providers.resolve_provider", return_value=mock_provider) as mock_res:
+            c._resolve("gpt-4o")
+            c._resolve("gpt-4o")
+        mock_res.assert_called_once()
+
+    def test_resolver_resolves_at_generate_time(self):
+        c = LLMClient(provider=None)
+        mock_provider = MagicMock()
+        mock_provider.generate = AsyncMock(return_value=_make_response("resolved"))
+        with patch("llmx.providers.resolve_provider", return_value=mock_provider):
+            result = asyncio.run(c.agenerate("hi", model="gpt-4o"))
+        assert result.content == "resolved"
+
+    def test_no_provider_error_bubbles_from_agenerate(self):
+        c = LLMClient(provider=None)
+        with patch("llmx.providers.resolve_provider", side_effect=NoProviderError("no match")):
+            with pytest.raises(NoProviderError):
+                asyncio.run(c.agenerate("hi", model="unknown-xyz"))
+
+    def test_ambiguous_provider_error_bubbles_from_agenerate(self):
+        c = LLMClient(provider=None)
+        with patch("llmx.providers.resolve_provider", side_effect=AmbiguousProviderError("ambig")):
+            with pytest.raises(AmbiguousProviderError):
+                asyncio.run(c.agenerate("hi", model="ambig-model"))
 
 
 # ===========================================================================
@@ -464,9 +616,36 @@ class TestAgenerate:
         mock = _attach(c, _make_response())
         mock_limiter = MagicMock()
         mock_limiter.acquire = AsyncMock()
-        c._get_limiter = MagicMock(return_value=mock_limiter)
+        c._limiter = mock_limiter
         asyncio.run(c.agenerate("hi"))
         mock_limiter.acquire.assert_called_once()
+
+    def test_invalid_request_error_bubbles_up_unwrapped(self):
+        """InvalidRequestError from validate() must NOT be wrapped in RuntimeError."""
+        c = _make_client()
+        _attach(c, _make_response())
+        # temperature=99.0 will fail validate()
+        with pytest.raises(InvalidRequestError):
+            asyncio.run(c.agenerate("hi", temperature=99.0))
+
+    def test_validate_called_automatically_on_agenerate(self):
+        """validate() is triggered via _to_request for every agenerate call."""
+        c = _make_client()
+        _attach(c, _make_response())
+        req = GenerateRequest(messages=[], max_tokens=-1)
+        with pytest.raises(InvalidRequestError):
+            asyncio.run(c.agenerate(req))
+
+    def test_llmx_error_bubbles_unwrapped(self):
+        """Any LLMXError subclass passes through agenerate without RuntimeError wrap."""
+        from llmx.exceptions import ProviderUnavailableError
+        c = _make_client()
+        mock = MagicMock()
+        mock.generate = AsyncMock(side_effect=ProviderUnavailableError("down"))
+        c._provider = mock
+        with pytest.raises(ProviderUnavailableError):
+            asyncio.run(c.agenerate("hi"))
+
 
 # ===========================================================================
 # LLMClient — astream
@@ -537,7 +716,7 @@ class TestAstream:
         _attach(c, _make_response())
         mock_limiter = MagicMock()
         mock_limiter.acquire = AsyncMock()
-        c._get_limiter = MagicMock(return_value=mock_limiter)
+        c._limiter = mock_limiter
 
         async def collect():
             return [ch async for ch in c.astream("hi")]
@@ -553,6 +732,43 @@ class TestAstream:
             return [ch async for ch in c.astream(None)]
 
         with pytest.raises(TypeError):
+            asyncio.run(collect())
+
+    def test_invalid_request_error_bubbles_up_unwrapped(self):
+        """InvalidRequestError from validate() must NOT be wrapped in RuntimeError."""
+        c = _make_client()
+        _attach(c, _make_response())
+
+        async def collect():
+            return [ch async for ch in c.astream("hi", temperature=99.0)]
+
+        with pytest.raises(InvalidRequestError):
+            asyncio.run(collect())
+
+    def test_validate_called_automatically_on_astream(self):
+        """validate() is triggered via _to_request for every astream call."""
+        c = _make_client()
+        _attach(c, _make_response())
+        req = GenerateRequest(messages=[], max_tokens=0)
+
+        async def collect():
+            return [ch async for ch in c.astream(req)]
+
+        with pytest.raises(InvalidRequestError):
+            asyncio.run(collect())
+
+    def test_llmx_error_bubbles_unwrapped(self):
+        """LLMXError from provider.stream is re-raised without wrapping in RuntimeError."""
+        from llmx.exceptions import ProviderUnavailableError
+        c = _make_client()
+        mock = MagicMock()
+        mock.stream = MagicMock(side_effect=ProviderUnavailableError("service down"))
+        c._provider = mock
+
+        async def collect():
+            return [ch async for ch in c.astream("hi")]
+
+        with pytest.raises(ProviderUnavailableError):
             asyncio.run(collect())
 
 
@@ -636,3 +852,23 @@ class TestSyncWrappers:
         c._provider = mock
         with pytest.raises(RuntimeError):
             list(c.stream("hi"))
+
+    def test_generate_raises_in_async_context(self):
+        c = _make_client()
+        _attach(c, _make_response())
+
+        async def call_sync():
+            return c.generate("hi")
+
+        with pytest.raises(RuntimeError, match="running event loop"):
+            asyncio.run(call_sync())
+
+    def test_stream_raises_in_async_context(self):
+        c = _make_client()
+        _attach(c, _make_response())
+
+        async def call_sync():
+            return list(c.stream("hi"))
+
+        with pytest.raises(RuntimeError, match="running event loop"):
+            asyncio.run(call_sync())

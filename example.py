@@ -1,154 +1,221 @@
 import os
-from dotenv import load_dotenv
-
-# Load environment variables
-load_dotenv()
-
+import asyncio
 from llmx import LLMClient, Message
 
-# ------------------------------------------------------------------
-# Validate environment
-# ------------------------------------------------------------------
-if not os.getenv("OPENAI_API_KEY"):
-    raise EnvironmentError("OPENAI_API_KEY not set in environment")
 
 # ------------------------------------------------------------------
-# Initialize client
+# Helpers
 # ------------------------------------------------------------------
-client = LLMClient(provider="openai")
-print(f"Client initialized: {client}")
+
+def log(title):
+    print(f"\n{'='*10} {title} {'='*10}")
+
+def ok(msg):
+    print(f"[OK] {msg}")
+
+def fail(msg, e=None):
+    print(f"[FAIL] {msg}")
+    if e:
+        print("   →", repr(e))
+
 
 # ------------------------------------------------------------------
-# Simple string prompt
+# ENV CHECK
 # ------------------------------------------------------------------
-try:
-    response = client.generate(
-        "What is the capital of France?",
-        model="gpt-4o"
-    )
-    print("\n[Simple Prompt]")
-    print("Response:", response.content)
-    print("Usage:", response.usage)
-except Exception as e:
-    print("Error in simple prompt:", e)
+
+OPENAI = bool(os.getenv("OPENAI_API_KEY"))
+GROQ = bool(os.getenv("GROQ_API_KEY"))
+GEMINI = bool(os.getenv("GEMINI_API_KEY"))
+
+print("Env status:")
+print("OPENAI:", OPENAI)
+print("GROQ:", GROQ)
+print("GEMINI:", GEMINI)
+
 
 # ------------------------------------------------------------------
-# With options
+# OPENAI TESTS
 # ------------------------------------------------------------------
-try:
-    response = client.generate(
-        "Write a sentence about oxygen",
-        model="gpt-4o",
-        temperature=0.9,
-        max_tokens=100,
-    )
-    print("\n[With Options]")
-    print(response.content)
-except Exception as e:
-    print("Error in options call:", e)
 
-# ------------------------------------------------------------------
-# Multi-turn conversation
-# ------------------------------------------------------------------
-try:
-    messages = [
-        Message(role="user", content="My name is Rithika."),
-        Message(role="assistant", content="Nice to meet you, Rithika!"),
-        Message(role="user", content="What's my name?"),
-    ]
+if OPENAI:
+    log("OpenAI Integration")
 
-    response = client.generate(
-        messages,
-        model="gpt-4o",
-        system="You are a helpful assistant."
-    )
+    client = LLMClient(provider="openai")
 
-    print("\n[Multi-turn Conversation]")
-    print(response.content)
-except Exception as e:
-    print("Error in conversation:", e)
+    # Simple prompt
+    try:
+        resp = client.generate("Say hello world", model="gpt-4o")
+        print("Response:", resp.content)
+        ok("Simple prompt works")
+    except Exception as e:
+        fail("Simple prompt failed", e)
 
-# ------------------------------------------------------------------
-# Streaming
-# ------------------------------------------------------------------
-try:
-    print("\n[Streaming]")
-    for chunk in client.stream(
-        "Count from 1 to 5 slowly.",
-        model="gpt-4o"
-    ):
-        print(chunk.delta or "", end="", flush=True)
-    print()
-except Exception as e:
-    print("Error in streaming:", e)
+    # With options
+    try:
+        resp = client.generate(
+            "Write one short sentence",
+            model="gpt-4o",
+            temperature=0.9,
+            max_tokens=50,
+        )
+        print("Response:", resp.content)
+        ok("Options work")
+    except Exception as e:
+        fail("Options test failed", e)
 
-# ------------------------------------------------------------------
-# Explicit provider (Groq)
-# ------------------------------------------------------------------
-try:
-    groq_client = LLMClient(provider="groq")
+    # Multi-turn
+    try:
+        msgs = [
+            Message("user", "My name is Rithika"),
+            Message("assistant", "Nice to meet you"),
+            Message("user", "What's my name?"),
+        ]
+        resp = client.generate(msgs, model="gpt-4o")
+        print("Response:", resp.content)
 
-    response = groq_client.generate(
-        "Hello from Groq!",
-        model="groq/compound-mini"
-    )
+        if "Rithika" in resp.content:
+            ok("Multi-turn works")
+        else:
+            fail("Multi-turn incorrect response")
 
-    print("\n[Groq]")
-    print(response.content)
-except Exception as e:
-    print("Error with Groq:", e)
+    except Exception as e:
+        fail("Multi-turn failed", e)
 
-# ------------------------------------------------------------------
-# Switch provider dynamically
-# ------------------------------------------------------------------
-try:
-    gemini_client = client.use("gemini")
+    # Streaming
+    try:
+        print("Streaming:")
+        chunks = []
+        for c in client.stream("Count to 3", model="gpt-4o"):
+            print(c.delta or "", end="", flush=True)
+            chunks.append(c)
 
-    response = gemini_client.generate(
-        "Hello from Gemini!",
-        model="gemini-2.5-flash"
-    )
+        print()
+        if len(chunks) > 0:
+            ok("Streaming works")
+        else:
+            fail("No streaming output")
 
-    print("\n[Gemini]")
-    print(response.content)
-except Exception as e:
-    print("Error switching to Gemini:", e)
+    except Exception as e:
+        fail("Streaming failed", e)
 
-# ------------------------------------------------------------------
-# Tool calling
-# ------------------------------------------------------------------
-try:
-    tools = [
-        {
+    # Tool calling
+    try:
+        tools = [{
             "type": "function",
             "function": {
                 "name": "get_weather",
-                "description": "Get the weather for a city",
                 "parameters": {
                     "type": "object",
-                    "properties": {
-                        "city": {"type": "string"}
-                    },
+                    "properties": {"city": {"type": "string"}},
                     "required": ["city"],
                 },
             },
-        }
-    ]
+        }]
 
-    response = client.generate(
-        "What's the weather in Tokyo?",
-        model="gpt-4o",
-        tools=tools
-    )
+        resp = client.generate(
+            "What's the weather in Tokyo?",
+            model="gpt-4o",
+            tools=tools,
+        )
 
-    print("\n[Tool Calling]")
+        if resp.tool_calls:
+            print("Tool calls:", resp.tool_calls)
+            ok("Tool calling works")
+        else:
+            fail("No tool calls returned")
 
-    if response.tool_calls:
-        for tc in response.tool_calls:
-            print(f"Tool: {tc.name}, Args: {tc.arguments}")
-    else:
-        print("No tool calls returned")
-        print("Response:", response.content)
+    except Exception as e:
+        fail("Tool calling failed", e)
+
+
+# ------------------------------------------------------------------
+# GROQ TESTS
+# ------------------------------------------------------------------
+
+if GROQ:
+    log("Groq Integration")
+
+    client = LLMClient(provider="groq")
+
+    try:
+        resp = client.generate("Say hello", model="groq/compound-mini")
+        print("Response:", resp.content)
+        ok("Groq generate works")
+    except Exception as e:
+        fail("Groq generate failed", e)
+
+    try:
+        print("Streaming:")
+        chunks = list(client.stream("Count to 3", model="groq/compound-mini"))
+        print("Chunks:", len(chunks))
+        ok("Groq streaming works")
+    except Exception as e:
+        fail("Groq streaming failed", e)
+
+
+# ------------------------------------------------------------------
+# GEMINI TESTS
+# ------------------------------------------------------------------
+
+if GEMINI:
+    log("Gemini Integration")
+
+    client = LLMClient(provider="gemini")
+
+    try:
+        resp = client.generate("Say hello", model="gemini-2.5-flash")
+        print("Response:", resp.content)
+        ok("Gemini generate works")
+    except Exception as e:
+        fail("Gemini generate failed", e)
+
+    try:
+        chunks = list(client.stream("Count to 3", model="gemini-2.5-flash"))
+        print("Chunks:", len(chunks))
+        ok("Gemini streaming works")
+    except Exception as e:
+        fail("Gemini streaming failed", e)
+
+
+# ------------------------------------------------------------------
+# CLIENT BEHAVIOR
+# ------------------------------------------------------------------
+
+log("Client Behavior")
+
+# Provider switching
+try:
+    client = LLMClient(provider="openai")
+
+    if GROQ:
+        new_client = client.use("groq")
+        print("Old:", client.provider_name)
+        print("New:", new_client.provider_name)
+
+        if new_client is not client:
+            ok("Provider switching works")
+        else:
+            fail("Client reused incorrectly")
 
 except Exception as e:
-    print("Error in tool calling:", e)
+    fail("Provider switching failed", e)
+
+
+# Sync vs async
+try:
+    client = LLMClient(provider="openai")
+
+    sync_resp = client.generate("Say hi", model="gpt-4o")
+
+    async def run():
+        return await client.agenerate("Say hi", model="gpt-4o")
+
+    async_resp = asyncio.run(run())
+
+    print("Sync:", sync_resp.content)
+    print("Async:", async_resp.content)
+
+    ok("Sync vs Async works")
+
+except Exception as e:
+    fail("Sync vs Async failed", e)

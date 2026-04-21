@@ -9,13 +9,15 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
 from llmx.models import GenerateRequest, GenerateResponse, Message, StreamChunk, ToolCall, Usage
 from llmx.providers.openai import OpenAIProvider
 from llmx.providers.groq import GroqProvider
+from llmx.exceptions import AuthenticationError, RateLimitError, ProviderUnavailableError
+from llmx.config import LLMClientConfig
 
 
 # ===========================================================================
@@ -67,16 +69,16 @@ def _make_tc_mock(id_="call_1", name="get_weather", args=None):
     return tc
 
 
-def _make_openai_provider():
+def _make_openai_provider(config=None):
     with patch("openai.OpenAI") as mock_cls:
-        p = OpenAIProvider(api_key="sk-test")
+        p = OpenAIProvider(api_key="sk-test", config=config)
         p._client = mock_cls.return_value
     return p
 
 
-def _make_groq_provider():
+def _make_groq_provider(config=None):
     with patch("groq.Groq") as mock_cls:
-        p = GroqProvider(api_key="gsk-test")
+        p = GroqProvider(api_key="gsk-test", config=config)
         p._client = mock_cls.return_value
     return p
 
@@ -115,6 +117,24 @@ class TestOpenAIProviderInit:
 
     def test_name_attribute(self):
         assert OpenAIProvider.name == "openai"
+
+    def test_init_accepts_config(self):
+        cfg = LLMClientConfig(max_retries=5)
+        with patch("openai.OpenAI"):
+            p = OpenAIProvider(api_key="k", config=cfg)
+        assert p.config is cfg
+
+    def test_init_config_defaults_to_none(self):
+        with patch("openai.OpenAI"):
+            p = OpenAIProvider(api_key="k")
+        assert p.config is None
+
+    def test_missing_api_key_raises_authentication_error(self):
+        with patch.dict("os.environ", {}, clear=True):
+            import os
+            os.environ.pop("OPENAI_API_KEY", None)
+            with pytest.raises(AuthenticationError, match="OPENAI_API_KEY"):
+                OpenAIProvider()
 
 
 # ===========================================================================
@@ -298,10 +318,11 @@ class TestOpenAIGenerate:
 
         assert result.usage.total_tokens == 20
 
-    def test_generate_runtime_error_on_exception(self):
+    def test_generate_exception_propagates(self):
+        """Non-mapped exceptions propagate directly (no RuntimeError wrapper)."""
         with patch("asyncio.to_thread", new=AsyncMock(side_effect=Exception("boom"))):
             req = GenerateRequest(messages=[Message(role="user", content="hi")], model="gpt-4o")
-            with pytest.raises(RuntimeError, match="OpenAI generation failed"):
+            with pytest.raises(Exception, match="boom"):
                 asyncio.run(self.p.generate(req))
 
     def test_generate_key_error_propagates(self):
@@ -326,6 +347,163 @@ class TestOpenAIGenerate:
             req = GenerateRequest(messages=[Message(role="user", content="hi")], model="gpt-4o")
             result = asyncio.run(self.p.generate(req))
         assert result.content == ""
+
+
+# ===========================================================================
+# OpenAIProvider — exception mapping
+# ===========================================================================
+
+class TestOpenAIExceptionMapping:
+
+    def setup_method(self):
+        self.p = _make_openai_provider()
+
+    def _req(self):
+        return GenerateRequest(messages=[Message(role="user", content="hi")], model="gpt-4o")
+
+    def test_authentication_error_raised_immediately(self):
+        """openai.AuthenticationError → llmx AuthenticationError, not retried."""
+        import openai
+        import httpx
+
+        request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+        response = httpx.Response(401, request=request)
+        exc = openai.AuthenticationError("401 Unauthorized", response=response, body=None)
+
+        with patch("asyncio.to_thread", new=AsyncMock(side_effect=exc)):
+            with pytest.raises(AuthenticationError):
+                asyncio.run(self.p.generate(self._req()))
+
+    def test_authentication_error_not_retried(self):
+        """AuthenticationError is raised on first attempt only."""
+        import openai
+        import httpx
+
+        calls = []
+        request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+        response = httpx.Response(401, request=request)
+        exc = openai.AuthenticationError("401", response=response, body=None)
+
+        async def side_effect(fn, **kwargs):
+            calls.append(1)
+            raise exc
+
+        with patch("asyncio.to_thread", side_effect=side_effect):
+            with pytest.raises(AuthenticationError):
+                asyncio.run(self.p.generate(self._req()))
+
+        assert len(calls) == 1
+
+    def test_rate_limit_error_raised(self):
+        """openai.RateLimitError → llmx RateLimitError."""
+        import openai
+        import httpx
+
+        request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+        response = httpx.Response(429, request=request)
+        exc = openai.RateLimitError("429 Too Many Requests", response=response, body=None)
+
+        with patch("asyncio.to_thread", new=AsyncMock(side_effect=exc)):
+            with pytest.raises(RateLimitError):
+                asyncio.run(self.p.generate(self._req()))
+
+    def test_rate_limit_error_retried_up_to_max_retries(self):
+        """RateLimitError triggers retry up to max_retries times."""
+        import openai
+        import httpx
+
+        calls = []
+        request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+        response = httpx.Response(429, request=request)
+        exc = openai.RateLimitError("429", response=response, body=None)
+
+        cfg = LLMClientConfig(max_retries=2, base_delay=0.01, max_delay=0.1, timeout=30.0)
+        p = _make_openai_provider(config=cfg)
+
+        async def side_effect(fn, **kwargs):
+            calls.append(1)
+            raise exc
+
+        with patch("asyncio.to_thread", side_effect=side_effect):
+            with patch("llmx.providers.base.random.uniform", return_value=0.0):
+                with pytest.raises(RateLimitError):
+                    asyncio.run(p.generate(self._req()))
+
+        assert len(calls) == cfg.max_retries
+
+    def test_api_connection_error_mapped_to_provider_unavailable(self):
+        """openai.APIConnectionError → llmx ProviderUnavailableError."""
+        import openai
+        import httpx
+
+        request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+        exc = openai.APIConnectionError(message="connection refused", request=request)
+
+        with patch("asyncio.to_thread", new=AsyncMock(side_effect=exc)):
+            with pytest.raises(ProviderUnavailableError):
+                asyncio.run(self.p.generate(self._req()))
+
+    def test_api_status_error_5xx_mapped_to_provider_unavailable(self):
+        """openai.APIStatusError with 5xx → llmx ProviderUnavailableError."""
+        import openai
+        import httpx
+
+        request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+        response = httpx.Response(503, request=request)
+        exc = openai.APIStatusError("503 Service Unavailable", response=response, body=None)
+
+        with patch("asyncio.to_thread", new=AsyncMock(side_effect=exc)):
+            with pytest.raises(ProviderUnavailableError):
+                asyncio.run(self.p.generate(self._req()))
+
+    def test_provider_unavailable_retried_up_to_max_retries(self):
+        """ProviderUnavailableError triggers retry up to max_retries times."""
+        import openai
+        import httpx
+
+        calls = []
+        request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+        response = httpx.Response(503, request=request)
+        exc = openai.APIStatusError("503", response=response, body=None)
+
+        cfg = LLMClientConfig(max_retries=2, base_delay=0.01, max_delay=0.1, timeout=30.0)
+        p = _make_openai_provider(config=cfg)
+
+        async def side_effect(fn, **kwargs):
+            calls.append(1)
+            raise exc
+
+        with patch("asyncio.to_thread", side_effect=side_effect):
+            with patch("llmx.providers.base.random.uniform", return_value=0.0):
+                with pytest.raises(ProviderUnavailableError):
+                    asyncio.run(p.generate(self._req()))
+
+        assert len(calls) == cfg.max_retries
+
+    def test_config_forwarded_to_provider(self):
+        """config is stored and used by generate via _retry_with_backoff."""
+        cfg = LLMClientConfig(max_retries=1, base_delay=0.01, max_delay=0.1, timeout=30.0)
+        p = _make_openai_provider(config=cfg)
+        assert p.config is cfg
+
+    def test_jitter_applied_on_retry(self):
+        """random.uniform is called when a retry occurs."""
+        calls = []
+
+        async def side_effect(fn, **kwargs):
+            calls.append(1)
+            if len(calls) < 2:
+                raise ConnectionError("retry me")
+            return _openai_response("ok")
+
+        raw = _openai_response("ok")
+
+        with patch("asyncio.to_thread", side_effect=side_effect):
+            with patch("llmx.providers.base.random.uniform", return_value=0.0) as mock_rand:
+                req = GenerateRequest(messages=[Message("user", "hi")], model="gpt-4o")
+                asyncio.run(self.p.generate(req))
+
+        mock_rand.assert_called()
 
 
 # ===========================================================================
@@ -434,6 +612,24 @@ class TestGroqProviderInit:
     def test_name_attribute(self):
         assert GroqProvider.name == "groq"
 
+    def test_init_accepts_config(self):
+        cfg = LLMClientConfig(max_retries=5)
+        with patch("groq.Groq"):
+            p = GroqProvider(api_key="k", config=cfg)
+        assert p.config is cfg
+
+    def test_init_config_defaults_to_none(self):
+        with patch("groq.Groq"):
+            p = GroqProvider(api_key="k")
+        assert p.config is None
+
+    def test_missing_api_key_raises_authentication_error(self):
+        with patch.dict("os.environ", {}, clear=True):
+            import os
+            os.environ.pop("GROQ_API_KEY", None)
+            with pytest.raises(AuthenticationError, match="GROQ_API_KEY"):
+                GroqProvider()
+
 
 # ===========================================================================
 # GroqProvider — _build_kwargs
@@ -484,7 +680,6 @@ class TestGroqBuildKwargs:
 
 class TestGroqNormalize:
 
-
     def setup_method(self):
         self.p = _make_groq_provider()
 
@@ -504,7 +699,7 @@ class TestGroqNormalize:
         resp.model = model
         resp.usage = usage
         return resp
-    
+
     def test_normalize_missing_tool_calls_attr_deleted(self):
         """Hits the else branch: del msg.tool_calls so getattr returns None."""
         resp = self._make_resp()  # tool_calls=None → triggers del msg.tool_calls
@@ -608,10 +803,11 @@ class TestGroqGenerate:
             result = asyncio.run(self.p.generate(req))
         assert result.content == "groq answer"
 
-    def test_generate_runtime_error(self):
+    def test_generate_exception_propagates(self):
+        """Non-mapped exceptions propagate directly."""
         with patch("asyncio.to_thread", new=AsyncMock(side_effect=Exception("groq fail"))):
             req = GenerateRequest(messages=[], model="llama3")
-            with pytest.raises(RuntimeError, match="Groq generation failed"):
+            with pytest.raises(Exception, match="groq fail"):
                 asyncio.run(self.p.generate(req))
 
     def test_generate_with_tools(self):
@@ -671,6 +867,159 @@ class TestGroqGenerate:
             )
             result = asyncio.run(self.p.generate(req))
         assert result.content == "answer"
+
+
+# ===========================================================================
+# GroqProvider — exception mapping
+# ===========================================================================
+
+class TestGroqExceptionMapping:
+
+    def setup_method(self):
+        self.p = _make_groq_provider()
+
+    def _req(self):
+        return GenerateRequest(messages=[Message(role="user", content="hi")], model="llama3")
+
+    def test_authentication_error_raised_immediately(self):
+        """groq.AuthenticationError → llmx AuthenticationError."""
+        import groq
+        import httpx
+
+        request = httpx.Request("POST", "https://api.groq.com/v1/chat/completions")
+        response = httpx.Response(401, request=request)
+        exc = groq.AuthenticationError("401 Unauthorized", response=response, body=None)
+
+        with patch("asyncio.to_thread", new=AsyncMock(side_effect=exc)):
+            with pytest.raises(AuthenticationError):
+                asyncio.run(self.p.generate(self._req()))
+
+    def test_authentication_error_not_retried(self):
+        """AuthenticationError is raised on first attempt only."""
+        import groq
+        import httpx
+
+        calls = []
+        request = httpx.Request("POST", "https://api.groq.com/v1/chat/completions")
+        response = httpx.Response(401, request=request)
+        exc = groq.AuthenticationError("401", response=response, body=None)
+
+        async def side_effect(fn, **kwargs):
+            calls.append(1)
+            raise exc
+
+        with patch("asyncio.to_thread", side_effect=side_effect):
+            with pytest.raises(AuthenticationError):
+                asyncio.run(self.p.generate(self._req()))
+
+        assert len(calls) == 1
+
+    def test_rate_limit_error_raised(self):
+        """groq.RateLimitError → llmx RateLimitError."""
+        import groq
+        import httpx
+
+        request = httpx.Request("POST", "https://api.groq.com/v1/chat/completions")
+        response = httpx.Response(429, request=request)
+        exc = groq.RateLimitError("429 Too Many Requests", response=response, body=None)
+
+        with patch("asyncio.to_thread", new=AsyncMock(side_effect=exc)):
+            with pytest.raises(RateLimitError):
+                asyncio.run(self.p.generate(self._req()))
+
+    def test_rate_limit_error_retried_up_to_max_retries(self):
+        """RateLimitError triggers retry up to max_retries times."""
+        import groq
+        import httpx
+
+        calls = []
+        request = httpx.Request("POST", "https://api.groq.com/v1/chat/completions")
+        response = httpx.Response(429, request=request)
+        exc = groq.RateLimitError("429", response=response, body=None)
+
+        cfg = LLMClientConfig(max_retries=2, base_delay=0.01, max_delay=0.1, timeout=30.0)
+        p = _make_groq_provider(config=cfg)
+
+        async def side_effect(fn, **kwargs):
+            calls.append(1)
+            raise exc
+
+        with patch("asyncio.to_thread", side_effect=side_effect):
+            with patch("llmx.providers.base.random.uniform", return_value=0.0):
+                with pytest.raises(RateLimitError):
+                    asyncio.run(p.generate(self._req()))
+
+        assert len(calls) == cfg.max_retries
+
+    def test_api_connection_error_mapped_to_provider_unavailable(self):
+        """groq.APIConnectionError → llmx ProviderUnavailableError."""
+        import groq
+        import httpx
+
+        request = httpx.Request("POST", "https://api.groq.com/v1/chat/completions")
+        exc = groq.APIConnectionError(message="connection refused", request=request)
+
+        with patch("asyncio.to_thread", new=AsyncMock(side_effect=exc)):
+            with pytest.raises(ProviderUnavailableError):
+                asyncio.run(self.p.generate(self._req()))
+
+    def test_provider_unavailable_retried_up_to_max_retries(self):
+        """ProviderUnavailableError triggers retry up to max_retries times."""
+        import groq
+        import httpx
+
+        calls = []
+        request = httpx.Request("POST", "https://api.groq.com/v1/chat/completions")
+        exc = groq.APIConnectionError(message="connection down", request=request)
+
+        cfg = LLMClientConfig(max_retries=2, base_delay=0.01, max_delay=0.1, timeout=30.0)
+        p = _make_groq_provider(config=cfg)
+
+        async def side_effect(fn, **kwargs):
+            calls.append(1)
+            raise exc
+
+        with patch("asyncio.to_thread", side_effect=side_effect):
+            with patch("llmx.providers.base.random.uniform", return_value=0.0):
+                with pytest.raises(ProviderUnavailableError):
+                    asyncio.run(p.generate(self._req()))
+
+        assert len(calls) == cfg.max_retries
+
+    def test_config_forwarded_to_provider(self):
+        cfg = LLMClientConfig(max_retries=1)
+        p = _make_groq_provider(config=cfg)
+        assert p.config is cfg
+
+    def test_jitter_applied_on_retry(self):
+        """random.uniform is called when a retry occurs."""
+        calls = []
+
+        async def side_effect(fn, **kwargs):
+            calls.append(1)
+            if len(calls) < 2:
+                raise ConnectionError("retry me")
+            return _raw_resp_for_groq()
+
+        with patch("asyncio.to_thread", side_effect=side_effect):
+            with patch("llmx.providers.base.random.uniform", return_value=0.0) as mock_rand:
+                req = GenerateRequest(messages=[Message("user", "hi")], model="llama3")
+                asyncio.run(self.p.generate(req))
+
+        mock_rand.assert_called()
+
+
+def _raw_resp_for_groq(content="ok", model="llama3"):
+    msg = MagicMock()
+    msg.content = content
+    msg.tool_calls = None
+    choice = MagicMock()
+    choice.message = msg
+    resp = MagicMock()
+    resp.choices = [choice]
+    resp.model = model
+    resp.usage = None
+    return resp
 
 
 # ===========================================================================

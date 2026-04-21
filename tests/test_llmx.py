@@ -91,20 +91,6 @@ class TestClientInitialisation:
         client = _make_client("openai")
         assert "openai" in repr(client)
 
-    def test_auto_detect_openai_from_env(self):
-        clean = {k: v for k, v in os.environ.items()
-                 if k not in ("OPENAI_API_KEY", "GROQ_API_KEY", "GEMINI_API_KEY")}
-        with patch.dict(os.environ, {**clean, "OPENAI_API_KEY": "sk-test"}, clear=True):
-            with patch("llmx.providers.openai.OpenAIProvider.__init__", return_value=None):
-                client = LLMClient()
-        assert client.provider_name == "openai"
-
-    def test_auto_detect_raises_when_no_key_set(self):
-        clean = {k: v for k, v in os.environ.items()
-                 if k not in ("OPENAI_API_KEY", "GROQ_API_KEY", "GEMINI_API_KEY")}
-        with patch.dict(os.environ, clean, clear=True):
-            with pytest.raises(EnvironmentError, match="No LLM provider detected"):
-                LLMClient()
 
     def test_unknown_provider_raises_value_error(self):
         with pytest.raises(ValueError, match="Unknown provider"):

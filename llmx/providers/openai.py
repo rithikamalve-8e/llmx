@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from typing import Iterator
+from typing import TYPE_CHECKING
 
 from llmx.models import (
     GenerateRequest,
@@ -11,6 +11,10 @@ from llmx.models import (
     Usage,
 )
 from llmx.providers.base import BaseProvider
+from llmx.exceptions import AuthenticationError, RateLimitError, ProviderUnavailableError
+
+if TYPE_CHECKING:
+    from llmx.config import LLMClientConfig
 
 import logging
 import asyncio
@@ -20,38 +24,59 @@ logger = logging.getLogger(__name__)
 
 class OpenAIProvider(BaseProvider):
     name = "openai"
-    env_var="OPENAI_API_KEY"
+    env_var = "OPENAI_API_KEY"
+
+    _MODEL_PREFIXES = ("gpt-", "o1", "o3", "o4", "chatgpt-", "text-embedding-", "text-davinci-")
+
+    @classmethod
+    def supports_model(cls, model: str) -> bool:
+        return any(model.startswith(p) for p in cls._MODEL_PREFIXES)
 
     def __init__(
         self,
         api_key: str | None = None,
         base_url: str | None = None,
-    )-> None:
+        config: "LLMClientConfig | None" = None,
+    ) -> None:
         try:
             from openai import OpenAI
         except ImportError as exc:
             raise ImportError("pip install openai") from exc
 
-        self._client = OpenAI(
-            api_key=api_key or os.environ["OPENAI_API_KEY"],
-            base_url=base_url,
-        )
+        resolved_key = api_key or os.environ.get("OPENAI_API_KEY")
+        if not resolved_key:
+            raise AuthenticationError(
+                "OpenAI API key not found. Pass api_key= or set the OPENAI_API_KEY environment variable."
+            )
+        self.config = config
+        self._client = OpenAI(api_key=resolved_key, base_url=base_url)
 
     #core
 
     async def generate(self, request: GenerateRequest) -> GenerateResponse:
-        try:
-            kwargs = self._build_kwargs(request, stream=False)
-            resp = await asyncio.to_thread(
-                self._client.chat.completions.create, **kwargs
-            )
-            return self._normalize(resp)
-        except KeyError:
-            logger.exception("Missing API key or config")
-            raise
-        except Exception as e:
-            logger.exception("OpenAI generate failed")
-            raise RuntimeError("OpenAI generation failed") from e
+        async def _call():
+            try:
+                import openai as _openai
+                kwargs = self._build_kwargs(request, stream=False)
+                resp = await asyncio.to_thread(
+                    self._client.chat.completions.create, **kwargs
+                )
+                return self._normalize(resp)
+            except KeyError:
+                logger.exception("Missing API key or config")
+                raise
+            except _openai.AuthenticationError as e:
+                raise AuthenticationError(str(e)) from e
+            except _openai.RateLimitError as e:
+                raise RateLimitError(str(e)) from e
+            except _openai.APIConnectionError as e:
+                raise ProviderUnavailableError(str(e)) from e
+            except _openai.APIStatusError as e:
+                if e.status_code >= 500:
+                    raise ProviderUnavailableError(str(e)) from e
+                raise
+
+        return await self._retry_with_backoff(_call, config=self.config)
 
     async def stream(self, request: GenerateRequest):
         kwargs = self._build_kwargs(request, stream=True)
@@ -74,12 +99,11 @@ class OpenAIProvider(BaseProvider):
         except Exception as e:
             logger.exception("OpenAI stream failed")
             raise RuntimeError("OpenAI streaming failed") from e
-        
 
     #helpers
 
     def _build_kwargs(self, request: GenerateRequest, stream: bool) -> dict:
-        kwargs ={
+        kwargs = {
             "model": request.model,
             "messages": self._build_messages(request),
             "temperature": request.temperature,
@@ -94,7 +118,7 @@ class OpenAIProvider(BaseProvider):
 
         return kwargs
 
-    def _normalize(self, resp)-> GenerateResponse:
+    def _normalize(self, resp) -> GenerateResponse:
         choice = resp.choices[0]
         msg = choice.message
 

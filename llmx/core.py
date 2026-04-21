@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import asyncio
 import logging
 from typing import Iterator, AsyncIterator
@@ -15,25 +14,62 @@ from llmx.models import (
 )
 from llmx.providers.base import BaseProvider
 from llmx.providers import load_provider
+from llmx.config import LLMClientConfig
+from llmx.exceptions import LLMXError, InvalidRequestError
 from aiolimiter import AsyncLimiter
-import weakref
+from dotenv import load_dotenv
+
+_dotenv_loaded = False
 
 
 class LLMClient:
-    def __init__(self, provider: str | None = None, **provider_kwargs) -> None:
-        name = provider or self._detect_provider()
-        self._provider: BaseProvider = load_provider(name, **provider_kwargs)
-        self.provider_name: str = name
-        self._limiters: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+    def __init__(
+        self,
+        provider: str | None = None,
+        config: LLMClientConfig | None = None,
+        **provider_kwargs,
+    ) -> None:
+        global _dotenv_loaded
+        if not _dotenv_loaded:
+            load_dotenv()
+            _dotenv_loaded = True
 
-    def _get_limiter(self) -> AsyncLimiter:
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-        if loop not in self._limiters:
-            self._limiters[loop] = AsyncLimiter(10, 1)
-        return self._limiters[loop]
+        self.config = config or LLMClientConfig()
+        self._provider_kwargs = provider_kwargs
+        self._resolved_cache: dict[str, BaseProvider] = {}
+        self._limiter = AsyncLimiter(self.config.rate_limit, self.config.rate_limit_period)
+
+        if provider is not None:
+            self._provider: BaseProvider | None = load_provider(
+                provider, config=self.config, **provider_kwargs
+            )
+            self.provider_name: str | None = provider
+        else:
+            self._provider = None
+            self.provider_name = None
+
+    def _resolve(self, model: str | None) -> BaseProvider:
+        """Return the provider to use for this request.
+
+        If an explicit provider was supplied at init, always use it.
+        Otherwise resolve by capability: find the unique registered provider
+        that reports supports_model(model) == True.
+        """
+        if self._provider is not None:
+            return self._provider
+
+        if model is None:
+            raise ValueError(
+                "model must be specified when LLMClient is created without an explicit provider "
+                "(needed for capability-based resolution)"
+            )
+
+        if model not in self._resolved_cache:
+            from llmx.providers import resolve_provider
+            self._resolved_cache[model] = resolve_provider(
+                model, config=self.config, **self._provider_kwargs
+            )
+        return self._resolved_cache[model]
 
     # sync
 
@@ -48,6 +84,16 @@ class LLMClient:
         tools: list[dict] | None = None,
         **extra,
     ) -> GenerateResponse:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            raise RuntimeError(
+                "LLMClient.generate() cannot be called from a running event loop. "
+                "Use 'await client.agenerate()' instead."
+            )
+
         return asyncio.run(
             self.agenerate(
                 prompt,
@@ -70,6 +116,15 @@ class LLMClient:
         max_tokens: int = 1024,
         **extra,
     ) -> Iterator[StreamChunk]:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            raise RuntimeError(
+                "LLMClient.stream() cannot be called from a running event loop. "
+                "Use 'async for chunk in client.astream()' instead."
+            )
 
         async def _runner():
             return [
@@ -110,16 +165,19 @@ class LLMClient:
                 extra=extra,
             )
 
-            await self._get_limiter().acquire()
-            result = self._provider.generate(request)
+            provider = self._resolve(request.model)
+            await self._limiter.acquire()
+            result = provider.generate(request)
 
             if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
                 return await result
 
             return result
 
-        except (TypeError, ValueError):
-            logger.exception("Invalid input to generate")
+        except (TypeError, ValueError, InvalidRequestError):
+            logger.exception("Invalid request to generate")
+            raise
+        except LLMXError:
             raise
         except Exception as e:
             logger.exception("Provider generate failed")
@@ -145,8 +203,9 @@ class LLMClient:
                 extra=extra,
             )
 
-            await self._get_limiter().acquire()
-            stream = self._provider.stream(request)
+            provider = self._resolve(request.model)
+            await self._limiter.acquire()
+            stream = provider.stream(request)
 
             if hasattr(stream, "__aiter__"):
                 async for chunk in stream:
@@ -155,43 +214,28 @@ class LLMClient:
                 for chunk in stream:
                     yield chunk
 
-        except (TypeError, ValueError):
-            logger.exception("Invalid input to stream")
+        except (TypeError, ValueError, InvalidRequestError):
+            logger.exception("Invalid request to stream")
+            raise
+        except LLMXError:
             raise
         except Exception as e:
             logger.exception("Provider stream failed")
             raise RuntimeError("LLM streaming failed") from e
 
     @property
-    def provider(self) -> BaseProvider:
+    def provider(self) -> BaseProvider | None:
         return self._provider
 
     def use(self, provider: str, **kwargs) -> "LLMClient":
-        return LLMClient(provider=provider, **kwargs)
+        return LLMClient(provider=provider, config=self.config, **kwargs)
 
     def __repr__(self) -> str:
-        return f"LLMClient(provider={self.provider_name!r})"
+        if self.provider_name is not None:
+            return f"LLMClient(provider={self.provider_name!r})"
+        return "LLMClient(provider=None)"
 
     # helper
-    from dotenv import load_dotenv
-    load_dotenv()
-    @staticmethod
-    def _detect_provider() -> str:
-        from llmx.providers import PROVIDER_REGISTRY
-        import importlib
-        
-
-        for name, (module_path, class_name) in PROVIDER_REGISTRY.items():
-            module = importlib.import_module(module_path)
-            provider_cls = getattr(module, class_name)
-
-            env_var = getattr(provider_cls, "env_var", None)
-            if env_var and os.environ.get(env_var):
-                return name
-
-        raise EnvironmentError(
-            "No LLM provider detected. Set any provider API key or pass provider explicitly."
-        )
 
     @staticmethod
     def _to_request(
@@ -205,6 +249,7 @@ class LLMClient:
         extra,
     ) -> GenerateRequest:
         if isinstance(prompt, GenerateRequest):
+            prompt.validate()
             return prompt
 
         if isinstance(prompt, str):
@@ -216,7 +261,7 @@ class LLMClient:
                 f"prompt must be str, list[Message], or GenerateRequest, got {type(prompt).__name__}"
             )
 
-        return GenerateRequest(
+        req = GenerateRequest(
             messages=messages,
             model=model,
             system=system,
@@ -225,3 +270,5 @@ class LLMClient:
             tools=tools,
             extra=extra or {},
         )
+        req.validate()
+        return req

@@ -38,6 +38,25 @@ class GenerateRequest:
     tools: Optional[list[dict]] = None
     extra: dict[str, Any] = field(default_factory=dict)
 
+    def validate(self) -> None:
+        from llmx.exceptions import InvalidRequestError
+
+        if not isinstance(self.messages, list):
+            raise InvalidRequestError("messages must be a list")
+
+        if not isinstance(self.temperature, (int, float)) or not (0.0 <= self.temperature <= 2.0):
+            raise InvalidRequestError(
+                f"temperature must be a float between 0.0 and 2.0, got {self.temperature!r}"
+            )
+
+        if not isinstance(self.max_tokens, int) or self.max_tokens <= 0:
+            raise InvalidRequestError(
+                f"max_tokens must be an integer greater than 0, got {self.max_tokens!r}"
+            )
+
+        if self.model is not None and self.model == "":
+            raise InvalidRequestError("model must not be an empty string (use None for provider default)")
+
 
 @dataclass
 class GenerateResponse:
@@ -54,5 +73,3 @@ class StreamChunk:
     finished: bool = False
     model: Optional[str] = None
     raw: Any = None
-
-

@@ -7,15 +7,33 @@ from llmx.models import (
     ToolCall,
     Usage,
 )
- 
+from llmx.exceptions import (
+    LLMXError,
+    AuthenticationError,
+    RateLimitError,
+    ProviderUnavailableError,
+    InvalidRequestError,
+    NoProviderError,
+    AmbiguousProviderError,
+)
+from llmx.config import LLMClientConfig
+
 __all__ = [
     "LLMClient",
+    "LLMClientConfig",
     "Message",
     "GenerateRequest",
     "GenerateResponse",
     "StreamChunk",
     "ToolCall",
     "Usage",
+    "LLMXError",
+    "AuthenticationError",
+    "RateLimitError",
+    "ProviderUnavailableError",
+    "InvalidRequestError",
+    "NoProviderError",
+    "AmbiguousProviderError",
 ]
- 
+
 __version__ = "0.1.0"

@@ -14,6 +14,8 @@ import pytest
 
 from llmx.models import GenerateRequest, GenerateResponse, Message, StreamChunk, ToolCall
 from llmx.providers.gemini import GeminiProvider
+from llmx.exceptions import AuthenticationError, RateLimitError, ProviderUnavailableError
+from llmx.config import LLMClientConfig
 
 
 # ===========================================================================
@@ -57,10 +59,21 @@ def _make_genai_mock():
     return genai
 
 
+def _make_gexc_mock():
+    """Build a mock google.api_core.exceptions module with fake exception classes."""
+    gexc = MagicMock()
+    gexc.Unauthenticated = type("Unauthenticated", (Exception,), {})
+    gexc.ResourceExhausted = type("ResourceExhausted", (Exception,), {})
+    gexc.ServiceUnavailable = type("ServiceUnavailable", (Exception,), {})
+    return gexc
+
+
 def _make_provider(genai_mock=None):
     """Construct GeminiProvider with a patched google.genai."""
     if genai_mock is None:
         genai_mock = _make_genai_mock()
+
+    gexc_mock = _make_gexc_mock()
 
     with patch.dict(
         sys.modules,
@@ -68,6 +81,8 @@ def _make_provider(genai_mock=None):
             "google": MagicMock(genai=genai_mock),
             "google.genai": genai_mock,
             "google.genai.types": genai_mock.types,
+            "google.api_core": MagicMock(exceptions=gexc_mock),
+            "google.api_core.exceptions": gexc_mock,
         },
     ):
         p = GeminiProvider(api_key="test-key")
@@ -75,17 +90,21 @@ def _make_provider(genai_mock=None):
     # Attach mock references so tests can control behaviour
     p._genai = genai_mock
     p._client = genai_mock.Client.return_value
+    p._gexc_mock = gexc_mock  # stored for use in exception tests
     return p, genai_mock
 
 
 def _inject_types(p, genai_mock):
-    """Context manager helper: patches sys.modules so _prepare can import types."""
+    """Context manager helper: patches sys.modules so _prepare and _call can import."""
+    gexc_mock = getattr(p, "_gexc_mock", _make_gexc_mock())
     return patch.dict(
         sys.modules,
         {
             "google": MagicMock(genai=genai_mock),
             "google.genai": genai_mock,
             "google.genai.types": genai_mock.types,
+            "google.api_core": MagicMock(exceptions=gexc_mock),
+            "google.api_core.exceptions": gexc_mock,
         },
     )
 
@@ -105,21 +124,27 @@ class TestGeminiInit:
 
     def test_init_with_explicit_key(self):
         genai = _make_genai_mock()
+        gexc_mock = _make_gexc_mock()
         with patch.dict(sys.modules, {
             "google": MagicMock(genai=genai),
             "google.genai": genai,
             "google.genai.types": genai.types,
+            "google.api_core": MagicMock(exceptions=gexc_mock),
+            "google.api_core.exceptions": gexc_mock,
         }):
             p = GeminiProvider(api_key="my-key")
         genai.Client.assert_called_once_with(api_key="my-key")
 
     def test_init_reads_env_var(self):
         genai = _make_genai_mock()
+        gexc_mock = _make_gexc_mock()
         with patch.dict("os.environ", {"GEMINI_API_KEY": "env-key"}):
             with patch.dict(sys.modules, {
                 "google": MagicMock(genai=genai),
                 "google.genai": genai,
                 "google.genai.types": genai.types,
+                "google.api_core": MagicMock(exceptions=gexc_mock),
+                "google.api_core.exceptions": gexc_mock,
             }):
                 GeminiProvider()
         genai.Client.assert_called_once_with(api_key="env-key")
@@ -142,6 +167,38 @@ class TestGeminiInit:
     def test_client_stored_on_instance(self):
         p, genai = _make_provider()
         assert p._client is genai.Client.return_value
+
+    def test_init_accepts_config(self):
+        cfg = LLMClientConfig(max_retries=5)
+        genai = _make_genai_mock()
+        gexc_mock = _make_gexc_mock()
+        with patch.dict(sys.modules, {
+            "google": MagicMock(genai=genai),
+            "google.genai": genai,
+            "google.genai.types": genai.types,
+            "google.api_core": MagicMock(exceptions=gexc_mock),
+            "google.api_core.exceptions": gexc_mock,
+        }):
+            p = GeminiProvider(api_key="k", config=cfg)
+        assert p.config is cfg
+
+    def test_init_config_defaults_to_none(self):
+        p, _ = _make_provider()
+        assert p.config is None
+
+    def test_missing_api_key_raises_authentication_error(self):
+        genai_mock = _make_genai_mock()
+        gexc_mock = _make_gexc_mock()
+        with patch.dict(sys.modules, {
+            "google": MagicMock(genai=genai_mock),
+            "google.genai": genai_mock,
+            "google.genai.types": genai_mock.types,
+            "google.api_core": MagicMock(exceptions=gexc_mock),
+            "google.api_core.exceptions": gexc_mock,
+        }):
+            with patch.dict("os.environ", {}, clear=True):
+                with pytest.raises(AuthenticationError, match="GEMINI_API_KEY"):
+                    GeminiProvider()
 
 
 # ===========================================================================
@@ -376,7 +433,7 @@ class TestGeminiNormalize:
 
         assert len(result.tool_calls) == 1
         assert result.tool_calls[0].name == "calculate"
-        assert result.tool_calls[0].id == "calculate"
+        assert result.tool_calls[0].id == "calculate_0"
         assert result.tool_calls[0].arguments == {"x": 1, "y": 2}
 
     def test_multiple_tool_calls(self):
@@ -481,14 +538,15 @@ class TestGeminiGenerate:
             with pytest.raises(ValueError):
                 asyncio.run(self.p.generate(req))
 
-    def test_generate_runtime_error_on_other_exception(self):
+    def test_generate_exception_propagates(self):
+        """Non-mapped exceptions propagate directly (no RuntimeError wrapper)."""
         with _inject_types(self.p, self.genai):
             with patch("asyncio.to_thread", new=AsyncMock(side_effect=Exception("api error"))):
                 req = GenerateRequest(
                     messages=[Message(role="user", content="hi")],
                     model="gemini-pro",
                 )
-                with pytest.raises(RuntimeError, match="Gemini generation failed"):
+                with pytest.raises(Exception, match="api error"):
                     asyncio.run(self.p.generate(req))
 
     def test_generate_with_system_prompt(self):
@@ -551,6 +609,161 @@ class TestGeminiGenerate:
                 )
                 result = asyncio.run(self.p.generate(req))
         assert result.content == ""
+
+
+# ===========================================================================
+# generate — exception mapping
+# ===========================================================================
+
+class TestGeminiExceptionMapping:
+
+    def setup_method(self):
+        self.p, self.genai = _make_provider()
+
+    def _req(self):
+        return GenerateRequest(
+            messages=[Message(role="user", content="hi")],
+            model="gemini-pro",
+        )
+
+    def test_unauthenticated_mapped_to_authentication_error(self):
+        gexc = self.p._gexc_mock
+        exc = gexc.Unauthenticated("401 Unauthenticated")
+
+        with _inject_types(self.p, self.genai):
+            with patch("asyncio.to_thread", new=AsyncMock(side_effect=exc)):
+                with pytest.raises(AuthenticationError):
+                    asyncio.run(self.p.generate(self._req()))
+
+    def test_authentication_error_not_retried(self):
+        gexc = self.p._gexc_mock
+        calls = []
+        exc = gexc.Unauthenticated("401")
+
+        async def side_effect(fn, **kwargs):
+            calls.append(1)
+            raise exc
+
+        with _inject_types(self.p, self.genai):
+            with patch("asyncio.to_thread", side_effect=side_effect):
+                with pytest.raises(AuthenticationError):
+                    asyncio.run(self.p.generate(self._req()))
+
+        assert len(calls) == 1
+
+    def test_resource_exhausted_mapped_to_rate_limit_error(self):
+        gexc = self.p._gexc_mock
+        exc = gexc.ResourceExhausted("429 Resource Exhausted")
+
+        with _inject_types(self.p, self.genai):
+            with patch("asyncio.to_thread", new=AsyncMock(side_effect=exc)):
+                with pytest.raises(RateLimitError):
+                    asyncio.run(self.p.generate(self._req()))
+
+    def test_rate_limit_error_retried_up_to_max_retries(self):
+        cfg = LLMClientConfig(max_retries=2, base_delay=0.01, max_delay=0.1, timeout=30.0)
+        p, genai = _make_provider()
+        p.config = cfg
+        gexc = p._gexc_mock
+        calls = []
+        exc = gexc.ResourceExhausted("429")
+
+        async def side_effect(fn, **kwargs):
+            calls.append(1)
+            raise exc
+
+        with _inject_types(p, genai):
+            with patch("asyncio.to_thread", side_effect=side_effect):
+                with patch("llmx.providers.base.random.uniform", return_value=0.0):
+                    with pytest.raises(RateLimitError):
+                        asyncio.run(p.generate(self._req()))
+
+        assert len(calls) == cfg.max_retries
+
+    def test_service_unavailable_mapped_to_provider_unavailable(self):
+        gexc = self.p._gexc_mock
+        exc = gexc.ServiceUnavailable("503 Service Unavailable")
+
+        with _inject_types(self.p, self.genai):
+            with patch("asyncio.to_thread", new=AsyncMock(side_effect=exc)):
+                with pytest.raises(ProviderUnavailableError):
+                    asyncio.run(self.p.generate(self._req()))
+
+    def test_provider_unavailable_retried_up_to_max_retries(self):
+        cfg = LLMClientConfig(max_retries=2, base_delay=0.01, max_delay=0.1, timeout=30.0)
+        p, genai = _make_provider()
+        p.config = cfg
+        gexc = p._gexc_mock
+        calls = []
+        exc = gexc.ServiceUnavailable("503")
+
+        async def side_effect(fn, **kwargs):
+            calls.append(1)
+            raise exc
+
+        with _inject_types(p, genai):
+            with patch("asyncio.to_thread", side_effect=side_effect):
+                with patch("llmx.providers.base.random.uniform", return_value=0.0):
+                    with pytest.raises(ProviderUnavailableError):
+                        asyncio.run(p.generate(self._req()))
+
+        assert len(calls) == cfg.max_retries
+
+    def test_config_forwarded_to_provider(self):
+        cfg = LLMClientConfig(max_retries=1)
+        genai = _make_genai_mock()
+        gexc_mock = _make_gexc_mock()
+        with patch.dict(sys.modules, {
+            "google": MagicMock(genai=genai),
+            "google.genai": genai,
+            "google.genai.types": genai.types,
+            "google.api_core": MagicMock(exceptions=gexc_mock),
+            "google.api_core.exceptions": gexc_mock,
+        }):
+            p = GeminiProvider(api_key="k", config=cfg)
+        assert p.config is cfg
+
+    def test_jitter_applied_on_retry(self):
+        """random.uniform is called when a retry occurs."""
+        calls = []
+
+        async def side_effect(fn, **kwargs):
+            calls.append(1)
+            if len(calls) < 2:
+                raise ConnectionError("retry me")
+            return _raw_response("ok")
+
+        with _inject_types(self.p, self.genai):
+            with patch("asyncio.to_thread", side_effect=side_effect):
+                with patch("llmx.providers.base.random.uniform", return_value=0.0) as mock_rand:
+                    req = GenerateRequest(
+                        messages=[Message("user", "hi")],
+                        model="gemini-pro",
+                    )
+                    asyncio.run(self.p.generate(req))
+
+        mock_rand.assert_called()
+
+    def test_generate_exception_when_gexc_import_fails(self):
+        """Covers except ImportError: _gexc = None branch in generate._call."""
+        p, genai = _make_provider()
+        with patch.dict(
+            sys.modules,
+            {
+                "google": MagicMock(genai=genai),
+                "google.genai": genai,
+                "google.genai.types": genai.types,
+                "google.api_core": None,
+                "google.api_core.exceptions": None,
+            },
+        ):
+            with patch("asyncio.to_thread", new=AsyncMock(side_effect=RuntimeError("no gexc"))):
+                req = GenerateRequest(
+                    messages=[Message(role="user", content="hi")],
+                    model="gemini-pro",
+                )
+                with pytest.raises(RuntimeError, match="no gexc"):
+                    asyncio.run(p.generate(req))
 
 
 # ===========================================================================
