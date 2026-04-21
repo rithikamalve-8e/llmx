@@ -394,11 +394,6 @@ class TestLLMClientInit:
         assert c2 is not c1
         assert c2.provider_name == "groq"
 
-    def test_limiter_created_at_init(self):
-        from aiolimiter import AsyncLimiter
-        c = _make_client()
-        assert isinstance(c._limiter, AsyncLimiter)
-
     def test_use_does_not_mutate_original(self):
         c1 = _make_client("openai")
         with patch("llmx.providers.groq.GroqProvider.__init__", return_value=None):
@@ -412,7 +407,7 @@ class TestLLMClientInit:
         mock_init.assert_called_once_with(config=ANY, api_key="test")
 
     def test_accepts_config_parameter(self):
-        cfg = LLMClientConfig(max_retries=5, rate_limit=20)
+        cfg = LLMClientConfig(max_retries=5)
         c = _make_client(config=cfg)
         assert c.config is cfg
 
@@ -422,19 +417,7 @@ class TestLLMClientInit:
 
     def test_default_config_has_expected_defaults(self):
         c = _make_client()
-        assert c.config.rate_limit == 10
-        assert c.config.rate_limit_period == 1.0
         assert c.config.max_retries == 3
-
-    def test_limiter_uses_config_rate_limit(self):
-        cfg = LLMClientConfig(rate_limit=5, rate_limit_period=2.0)
-        c = _make_client(config=cfg)
-        assert c._limiter.max_rate == 5
-
-    def test_limiter_uses_config_rate_limit_period(self):
-        cfg = LLMClientConfig(rate_limit=15, rate_limit_period=3.0)
-        c = _make_client(config=cfg)
-        assert c._limiter.time_period == 3.0
 
     def test_config_forwarded_to_provider_on_init(self):
         cfg = LLMClientConfig(max_retries=7)
@@ -611,15 +594,6 @@ class TestAgenerate:
         ))
         assert len(result.tool_calls) == 1
 
-    def test_rate_limiter_acquired(self):
-        c = _make_client()
-        mock = _attach(c, _make_response())
-        mock_limiter = MagicMock()
-        mock_limiter.acquire = AsyncMock()
-        c._limiter = mock_limiter
-        asyncio.run(c.agenerate("hi"))
-        mock_limiter.acquire.assert_called_once()
-
     def test_invalid_request_error_bubbles_up_unwrapped(self):
         """InvalidRequestError from validate() must NOT be wrapped in RuntimeError."""
         c = _make_client()
@@ -710,19 +684,6 @@ class TestAstream:
         chunks = asyncio.run(collect())
         assert chunks[0].delta == "x"
         assert chunks[1].finished is True
-
-    def test_rate_limiter_acquired(self):
-        c = _make_client()
-        _attach(c, _make_response())
-        mock_limiter = MagicMock()
-        mock_limiter.acquire = AsyncMock()
-        c._limiter = mock_limiter
-
-        async def collect():
-            return [ch async for ch in c.astream("hi")]
-
-        asyncio.run(collect())
-        mock_limiter.acquire.assert_called_once()
 
     def test_value_error_not_wrapped(self):
         c = _make_client()

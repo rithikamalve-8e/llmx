@@ -16,7 +16,6 @@ from llmx.providers.base import BaseProvider
 from llmx.providers import load_provider
 from llmx.config import LLMClientConfig
 from llmx.exceptions import LLMXError, InvalidRequestError
-from aiolimiter import AsyncLimiter
 from dotenv import load_dotenv
 
 _dotenv_loaded = False
@@ -37,7 +36,6 @@ class LLMClient:
         self.config = config or LLMClientConfig()
         self._provider_kwargs = provider_kwargs
         self._resolved_cache: dict[str, BaseProvider] = {}
-        self._limiter = AsyncLimiter(self.config.rate_limit, self.config.rate_limit_period)
 
         if provider is not None:
             self._provider: BaseProvider | None = load_provider(
@@ -166,7 +164,6 @@ class LLMClient:
             )
 
             provider = self._resolve(request.model)
-            await self._limiter.acquire()
             result = provider.generate(request)
 
             if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
@@ -204,7 +201,6 @@ class LLMClient:
             )
 
             provider = self._resolve(request.model)
-            await self._limiter.acquire()
             stream = provider.stream(request)
 
             if hasattr(stream, "__aiter__"):

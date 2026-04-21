@@ -4,5 +4,4 @@ google-genai
 python-dotenv
 pytest
 pytest-mock
-aiolimiter
 pytest-asyncio
