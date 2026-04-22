@@ -1,15 +1,24 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Literal, Optional
+
+_VALID_ROLES: frozenset[str] = frozenset({"user", "assistant", "system"})
 
 
 #basic
 
 @dataclass
 class Message:
-    role: str
+    role: Literal["user", "assistant", "system"]
     content: str
+
+    def __post_init__(self) -> None:
+        if self.role not in _VALID_ROLES:
+            from llmx.exceptions import InvalidRequestError
+            raise InvalidRequestError(
+                f"Message role must be one of {sorted(_VALID_ROLES)}, got {self.role!r}"
+            )
 
 
 @dataclass
@@ -43,6 +52,12 @@ class GenerateRequest:
 
         if not isinstance(self.messages, list):
             raise InvalidRequestError("messages must be a list")
+
+        for i, msg in enumerate(self.messages):
+            if not isinstance(msg, Message):
+                raise InvalidRequestError(
+                    f"messages[{i}] must be a Message instance, got {type(msg).__name__}"
+                )
 
         if not isinstance(self.temperature, (int, float)) or not (0.0 <= self.temperature <= 2.0):
             raise InvalidRequestError(

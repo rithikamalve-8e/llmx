@@ -67,7 +67,17 @@ class GroqProvider(BaseProvider):
                 resp = await asyncio.to_thread(
                     self._client.chat.completions.create, **kwargs
                 )
-                return self._normalize(resp)
+                result = self._normalize(resp)
+                logger.debug(
+                    "generate completed",
+                    extra={
+                        "provider": "groq",
+                        "model": result.model,
+                        "prompt_tokens": result.usage.prompt_tokens if result.usage else None,
+                        "completion_tokens": result.usage.completion_tokens if result.usage else None,
+                    },
+                )
+                return result
             except _groq.AuthenticationError as e:
                 raise AuthenticationError(str(e)) from e
             except _groq.RateLimitError as e:
@@ -102,7 +112,10 @@ class GroqProvider(BaseProvider):
                     raw=chunk,
                 )
         except Exception as e:
-            logger.exception("Groq stream failed")
+            logger.exception(
+                "stream failed",
+                extra={"provider": "groq", "model": request.model, "exc_type": type(e).__name__},
+            )
             raise RuntimeError("Groq streaming failed") from e
 
     #helpers

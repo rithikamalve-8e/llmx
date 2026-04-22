@@ -104,8 +104,14 @@ class BaseProvider(ABC):
             delay = random.uniform(0, cap)  # full jitter
 
             logger.warning(
-                "Retrying in %.2fs (attempt %d/%d) | exc_type=%s msg=%s",
-                delay, attempt + 1, retries, type(last_exc).__name__, last_exc,
+                "Retrying after transient error",
+                extra={
+                    "attempt": attempt + 1,
+                    "max_retries": retries,
+                    "delay_s": round(delay, 2),
+                    "exc_type": type(last_exc).__name__,
+                    "exc_msg": str(last_exc),
+                },
             )
 
             await asyncio.sleep(delay)

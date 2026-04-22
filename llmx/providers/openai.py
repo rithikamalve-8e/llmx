@@ -67,9 +67,19 @@ class OpenAIProvider(BaseProvider):
                 resp = await asyncio.to_thread(
                     self._client.chat.completions.create, **kwargs
                 )
-                return self._normalize(resp)
+                result = self._normalize(resp)
+                logger.debug(
+                    "generate completed",
+                    extra={
+                        "provider": "openai",
+                        "model": result.model,
+                        "prompt_tokens": result.usage.prompt_tokens if result.usage else None,
+                        "completion_tokens": result.usage.completion_tokens if result.usage else None,
+                    },
+                )
+                return result
             except KeyError:
-                logger.exception("Missing API key or config")
+                logger.exception("Missing API key or config", extra={"provider": "openai"})
                 raise
             except _openai.AuthenticationError as e:
                 raise AuthenticationError(str(e)) from e
@@ -109,7 +119,10 @@ class OpenAIProvider(BaseProvider):
                     raw=chunk,
                 )
         except Exception as e:
-            logger.exception("OpenAI stream failed")
+            logger.exception(
+                "stream failed",
+                extra={"provider": "openai", "model": request.model, "exc_type": type(e).__name__},
+            )
             raise RuntimeError("OpenAI streaming failed") from e
 
     #helpers

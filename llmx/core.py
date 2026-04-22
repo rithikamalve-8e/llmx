@@ -164,6 +164,17 @@ class LLMClient:
             )
 
             provider = self._resolve(request.model)
+            logger.debug(
+                "generate request",
+                extra={
+                    "provider": self.provider_name or type(provider).__name__,
+                    "model": request.model,
+                    "temperature": request.temperature,
+                    "max_tokens": request.max_tokens,
+                    "message_count": len(request.messages),
+                },
+            )
+
             result = provider.generate(request)
 
             if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
@@ -172,12 +183,18 @@ class LLMClient:
             return result
 
         except (TypeError, ValueError, InvalidRequestError):
-            logger.exception("Invalid request to generate")
+            logger.exception(
+                "Invalid request to generate",
+                extra={"provider": self.provider_name, "model": model},
+            )
             raise
         except LLMXError:
             raise
         except Exception as e:
-            logger.exception("Provider generate failed")
+            logger.exception(
+                "Provider generate failed",
+                extra={"provider": self.provider_name, "model": model, "exc_type": type(e).__name__},
+            )
             raise RuntimeError("LLM generation failed") from e
 
     async def astream(
@@ -201,6 +218,17 @@ class LLMClient:
             )
 
             provider = self._resolve(request.model)
+            logger.debug(
+                "stream request",
+                extra={
+                    "provider": self.provider_name or type(provider).__name__,
+                    "model": request.model,
+                    "temperature": request.temperature,
+                    "max_tokens": request.max_tokens,
+                    "message_count": len(request.messages),
+                },
+            )
+
             stream = provider.stream(request)
 
             if hasattr(stream, "__aiter__"):
@@ -211,12 +239,18 @@ class LLMClient:
                     yield chunk
 
         except (TypeError, ValueError, InvalidRequestError):
-            logger.exception("Invalid request to stream")
+            logger.exception(
+                "Invalid request to stream",
+                extra={"provider": self.provider_name, "model": model},
+            )
             raise
         except LLMXError:
             raise
         except Exception as e:
-            logger.exception("Provider stream failed")
+            logger.exception(
+                "Provider stream failed",
+                extra={"provider": self.provider_name, "model": model, "exc_type": type(e).__name__},
+            )
             raise RuntimeError("LLM streaming failed") from e
 
     @property

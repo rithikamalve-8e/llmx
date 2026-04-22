@@ -64,6 +64,7 @@ def _make_gexc_mock():
     gexc = MagicMock()
     gexc.Unauthenticated = type("Unauthenticated", (Exception,), {})
     gexc.ResourceExhausted = type("ResourceExhausted", (Exception,), {})
+    gexc.InvalidArgument = type("InvalidArgument", (Exception,), {})
     gexc.ServiceUnavailable = type("ServiceUnavailable", (Exception,), {})
     return gexc
 

@@ -74,9 +74,14 @@ class GeminiProvider(BaseProvider):
                     contents=contents,
                     config=config,
                 )
-                return self._normalize(resp, model_name)
+                result = self._normalize(resp, model_name)
+                logger.debug(
+                    "generate completed",
+                    extra={"provider": "gemini", "model": model_name},
+                )
+                return result
             except ValueError:
-                logger.exception("Invalid Gemini request")
+                logger.exception("Invalid Gemini request", extra={"provider": "gemini", "model": request.model})
                 raise
             except Exception as e:
                 if _gexc is not None:
@@ -114,7 +119,10 @@ class GeminiProvider(BaseProvider):
             yield StreamChunk(delta="", finished=True)
 
         except Exception as e:
-            logger.exception("Gemini stream failed")
+            logger.exception(
+                "stream failed",
+                extra={"provider": "gemini", "model": request.model, "exc_type": type(e).__name__},
+            )
             raise RuntimeError("Gemini streaming failed") from e
 
     # helpers

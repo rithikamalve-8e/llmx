@@ -416,10 +416,7 @@ class TestRetryWithBackoff:
 
         with pytest.raises(ConnectionError):
             asyncio.run(
-                self.p._retry_with_backoff(
-                    fn, retries=2, base_delay=0.01,
-                    retry_exceptions=(ConnectionError,)
-                )
+                self.p._retry_with_backoff(fn, retries=2, base_delay=0.01)
             )
 
     def test_raises_after_all_retries_timeout_error(self):
@@ -452,14 +449,11 @@ class TestRetryWithBackoff:
 
         async def fn():
             calls.append(1)
-            raise RuntimeError("not retryable")
+            raise AuthenticationError("bad key")
 
-        with pytest.raises(RuntimeError, match="not retryable"):
+        with pytest.raises(AuthenticationError, match="bad key"):
             asyncio.run(
-                self.p._retry_with_backoff(
-                    fn, retries=3, base_delay=0.01,
-                    retry_exceptions=(ConnectionError,)
-                )
+                self.p._retry_with_backoff(fn, retries=3, base_delay=0.01)
             )
         # Only called once — did not retry
         assert len(calls) == 1
@@ -475,15 +469,12 @@ class TestRetryWithBackoff:
             return "done"
 
         result = asyncio.run(
-            self.p._retry_with_backoff(
-                fn, retries=3, base_delay=0.01, max_delay=0.02,
-                retry_exceptions=(ConnectionError,)
-            )
+            self.p._retry_with_backoff(fn, retries=3, base_delay=0.01, max_delay=0.02)
         )
         assert result == "done"
 
     def test_early_raise_on_last_attempt_connection_error(self):
-        """Line 52-53: last attempt inside retry_exceptions block raises immediately."""
+        """Last attempt exhausted: re-raises the original exception."""
         calls = []
 
         async def fn():
@@ -492,15 +483,12 @@ class TestRetryWithBackoff:
 
         with pytest.raises(ConnectionError, match="dead"):
             asyncio.run(
-                self.p._retry_with_backoff(
-                    fn, retries=2, base_delay=0.01,
-                    retry_exceptions=(ConnectionError,)
-                )
+                self.p._retry_with_backoff(fn, retries=2, base_delay=0.01)
             )
         assert len(calls) == 2
 
     def test_post_loop_raise_via_asyncio_timeout(self):
-        """asyncio.TimeoutError path exhausts loop, post-loop guard fires."""
+        """asyncio.TimeoutError path exhausts all retries and re-raises."""
         calls = []
 
         async def fn():
@@ -509,29 +497,25 @@ class TestRetryWithBackoff:
 
         with pytest.raises(asyncio.TimeoutError):
             asyncio.run(
-                self.p._retry_with_backoff(
-                    fn, retries=2, base_delay=0.01, timeout=0.02,
-                    retry_exceptions=(ConnectionError,)
-                )
+                self.p._retry_with_backoff(fn, retries=2, base_delay=0.01, timeout=0.02)
             )
         assert len(calls) == 2
 
-    def test_custom_retry_exceptions(self):
+    def test_arbitrary_exceptions_are_retried(self):
+        """Non-non_retryable exceptions (e.g. OSError) are retried by default."""
         calls = []
 
         async def fn():
             calls.append(1)
             if len(calls) < 2:
-                raise OSError("custom")
+                raise OSError("transient")
             return "ok"
 
         result = asyncio.run(
-            self.p._retry_with_backoff(
-                fn, retries=3, base_delay=0.01,
-                retry_exceptions=(OSError,)
-            )
+            self.p._retry_with_backoff(fn, retries=3, base_delay=0.01)
         )
         assert result == "ok"
+        assert len(calls) == 2
 
     # ------------------------------------------------------------------
     # New tests for custom exceptions, jitter, and config
@@ -615,7 +599,6 @@ class TestRetryWithBackoff:
             asyncio.run(
                 self.p._retry_with_backoff(
                     fn, retries=99,  # overridden by config
-                    retry_exceptions=(ConnectionError,),
                     config=config,
                 )
             )
@@ -635,11 +618,7 @@ class TestRetryWithBackoff:
 
         with patch("llmx.providers.base.random.uniform", return_value=0.0):
             result = asyncio.run(
-                self.p._retry_with_backoff(
-                    fn,
-                    retry_exceptions=(ConnectionError,),
-                    config=config,
-                )
+                self.p._retry_with_backoff(fn, config=config)
             )
         assert result == "ok"
 
@@ -655,10 +634,7 @@ class TestRetryWithBackoff:
 
         with patch("llmx.providers.base.random.uniform", return_value=0.0) as mock_rand:
             asyncio.run(
-                self.p._retry_with_backoff(
-                    fn, retries=3, base_delay=0.01, max_delay=1.0,
-                    retry_exceptions=(ConnectionError,)
-                )
+                self.p._retry_with_backoff(fn, retries=3, base_delay=0.01, max_delay=1.0)
             )
 
         # attempt=0, rate_limit_multiplier=1.0 → cap = min(0.01 * 1, 1.0) = 0.01
