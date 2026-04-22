@@ -70,9 +70,11 @@ class BaseProvider(ABC):
             timeout = config.timeout
 
         non_retryable = (
+            AuthenticationError,
             InvalidRequestError,
             ContextLengthExceededError,
             QuotaExceededError,
+            
         )
 
         last_exc: Exception | None = None
