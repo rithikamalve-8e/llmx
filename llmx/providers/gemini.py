@@ -10,7 +10,13 @@ from llmx.models import (
     ToolCall,
 )
 from llmx.providers.base import BaseProvider
-from llmx.exceptions import AuthenticationError, RateLimitError, ProviderUnavailableError
+from llmx.exceptions import (
+    AuthenticationError,
+    RateLimitError,
+    ProviderUnavailableError,
+    ContextLengthExceededError,
+    QuotaExceededError,
+)
 
 if TYPE_CHECKING:
     from llmx.config import LLMClientConfig
@@ -77,7 +83,13 @@ class GeminiProvider(BaseProvider):
                     if isinstance(e, _gexc.Unauthenticated):
                         raise AuthenticationError(str(e)) from e
                     if isinstance(e, _gexc.ResourceExhausted):
+                        if "quota" in str(e).lower():
+                            raise QuotaExceededError(str(e)) from e
                         raise RateLimitError(str(e)) from e
+                    if isinstance(e, _gexc.InvalidArgument) and (
+                        "token" in str(e).lower() or "context" in str(e).lower()
+                    ):
+                        raise ContextLengthExceededError(str(e)) from e
                     if isinstance(e, _gexc.ServiceUnavailable):
                         raise ProviderUnavailableError(str(e)) from e
                 raise

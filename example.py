@@ -1,6 +1,8 @@
 import os
 import asyncio
 from llmx import LLMClient, Message
+from dotenv import load_dotenv
+load_dotenv()
 
 
 # ------------------------------------------------------------------

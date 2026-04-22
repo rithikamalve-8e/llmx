@@ -11,7 +11,14 @@ from llmx.models import (
     GenerateResponse,
     StreamChunk,
 )
-from llmx.exceptions import AuthenticationError, RateLimitError, ProviderUnavailableError
+from llmx.exceptions import (
+    AuthenticationError,
+    RateLimitError,
+    ProviderUnavailableError,
+    InvalidRequestError,
+    ContextLengthExceededError,
+    QuotaExceededError,
+)
 
 if TYPE_CHECKING:
     from llmx.config import LLMClientConfig
@@ -51,41 +58,52 @@ class BaseProvider(ABC):
         base_delay: float = 1.0,
         max_delay: float = 10.0,
         timeout: float = 30.0,
-        retry_exceptions: Tuple[Type[Exception], ...] = (TimeoutError, ConnectionError),
         config: "LLMClientConfig | None" = None,
-    ):
+    ) -> Any:
+        if retries <= 0:
+            raise ValueError("retries must be >= 1")
+
         if config is not None:
             retries = config.max_retries
             base_delay = config.base_delay
             max_delay = config.max_delay
             timeout = config.timeout
 
+        non_retryable = (
+            InvalidRequestError,
+            ContextLengthExceededError,
+            QuotaExceededError,
+        )
+
         last_exc: Exception | None = None
 
         for attempt in range(retries):
+            is_rate_limit = False
             try:
                 return await asyncio.wait_for(fn(), timeout=timeout)
-
-            except AuthenticationError:
+            
+            except asyncio.CancelledError:
                 raise
 
-            except (RateLimitError, ProviderUnavailableError) as e:
-                last_exc = e
+            except non_retryable:
+                raise
 
-            except retry_exceptions as e:
+            except Exception as e:
                 last_exc = e
-
-            except asyncio.TimeoutError as e:
-                last_exc = e
+                is_rate_limit = isinstance(e, RateLimitError)
 
             if attempt == retries - 1:
-                logger.exception("Max retries reached")
+                if last_exc is None:
+                    raise RuntimeError("Retry loop exited without capturing an exception")
                 raise last_exc
 
-            delay = min(base_delay * (2 ** attempt), max_delay) + random.uniform(0, 0.1 * base_delay)
+            rate_limit_multiplier = 3.0 if is_rate_limit else 1.0
+            cap = min(base_delay * (2 ** attempt) * rate_limit_multiplier, max_delay)
+            delay = random.uniform(0, cap)  # full jitter
 
             logger.warning(
-                f"Retrying in {delay:.2f}s (attempt {attempt + 1}/{retries}) due to: {last_exc}"
+                "Retrying in %.2fs (attempt %d/%d) | exc_type=%s msg=%s",
+                delay, attempt + 1, retries, type(last_exc).__name__, last_exc,
             )
 
             await asyncio.sleep(delay)

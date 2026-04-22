@@ -15,6 +15,8 @@ from llmx.exceptions import (
     InvalidRequestError,
     NoProviderError,
     AmbiguousProviderError,
+    ContextLengthExceededError,
+    QuotaExceededError,
 )
 from llmx.config import LLMClientConfig
 
@@ -34,6 +36,8 @@ __all__ = [
     "InvalidRequestError",
     "NoProviderError",
     "AmbiguousProviderError",
+    "ContextLengthExceededError",
+    "QuotaExceededError",
 ]
 
 __version__ = "0.1.0"

@@ -27,3 +27,11 @@ class NoProviderError(LLMXError):
 
 class AmbiguousProviderError(LLMXError):
     """Raised when multiple providers claim to support the same model; pass provider= explicitly."""
+
+
+class ContextLengthExceededError(LLMXError):
+    """Raised when the prompt exceeds the model's maximum context window."""
+
+
+class QuotaExceededError(LLMXError):
+    """Raised when the account's billing quota or usage limit is exhausted."""

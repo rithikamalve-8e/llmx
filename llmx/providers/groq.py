@@ -11,7 +11,13 @@ from llmx.models import (
     Usage,
 )
 from llmx.providers.base import BaseProvider
-from llmx.exceptions import AuthenticationError, RateLimitError, ProviderUnavailableError
+from llmx.exceptions import (
+    AuthenticationError,
+    RateLimitError,
+    ProviderUnavailableError,
+    ContextLengthExceededError,
+    QuotaExceededError,
+)
 
 if TYPE_CHECKING:
     from llmx.config import LLMClientConfig
@@ -65,7 +71,13 @@ class GroqProvider(BaseProvider):
             except _groq.AuthenticationError as e:
                 raise AuthenticationError(str(e)) from e
             except _groq.RateLimitError as e:
+                if getattr(e, "code", None) == "insufficient_quota" or "quota" in str(e).lower():
+                    raise QuotaExceededError(str(e)) from e
                 raise RateLimitError(str(e)) from e
+            except _groq.BadRequestError as e:
+                if getattr(e, "code", None) == "context_length_exceeded" or "context" in str(e).lower():
+                    raise ContextLengthExceededError(str(e)) from e
+                raise
             except _groq.APIConnectionError as e:
                 raise ProviderUnavailableError(str(e)) from e
 

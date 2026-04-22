@@ -644,7 +644,7 @@ class TestRetryWithBackoff:
         assert result == "ok"
 
     def test_jitter_applied_to_backoff_delay(self):
-        """random.uniform is called with (0, 0.1 * base_delay) when computing jitter."""
+        """Full jitter: random.uniform is called with (0, cap) where cap = min(base * 2^attempt, max_delay)."""
         calls = []
 
         async def fn():
@@ -661,4 +661,5 @@ class TestRetryWithBackoff:
                 )
             )
 
-        mock_rand.assert_called_with(0, 0.1 * 0.01)
+        # attempt=0, rate_limit_multiplier=1.0 → cap = min(0.01 * 1, 1.0) = 0.01
+        mock_rand.assert_called_with(0, 0.01)
