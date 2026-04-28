@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import nullcontext
 from typing import Iterator, AsyncIterator
 
 logger = logging.getLogger(__name__)
@@ -191,10 +192,36 @@ class LLMClient:
                     },
                 )
 
-            result = provider.generate(request)
+            gen_input = (
+                ([{"role": "system", "content": request.system}] if request.system else [])
+                + [{"role": m.role, "content": m.content} for m in request.messages]
+            )
+            gen_ctx = (
+                _lf.start_as_current_observation(
+                    as_type="generation",
+                    name=f"{provider_name}.generate",
+                    model=request.model,
+                    model_parameters={
+                        "temperature": request.temperature,
+                        "max_tokens": request.max_tokens,
+                    },
+                    input=gen_input,
+                )
+                if _lf else nullcontext()
+            )
 
-            if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
-                result = await result
+            with gen_ctx:
+                result = provider.generate(request)
+                if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
+                    result = await result
+                if _lf:
+                    _lf.update_current_generation(
+                        output=result.content,
+                        usage_details={
+                            "input": result.usage.prompt_tokens if result.usage else 0,
+                            "output": result.usage.completion_tokens if result.usage else 0,
+                        },
+                    )
 
             if _lf:
                 _lf.set_current_trace_io(output=result.content)

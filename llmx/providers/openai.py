@@ -25,7 +25,6 @@ if TYPE_CHECKING:
 import logging
 import asyncio
 
-from llmx.observability import observe, lf
 
 logger = logging.getLogger(__name__)
 
@@ -61,16 +60,7 @@ class OpenAIProvider(BaseProvider):
 
     #core
 
-    @observe(as_type="generation", name="openai.generate")
     async def generate(self, request: GenerateRequest) -> GenerateResponse:
-        _lf = lf()
-        if _lf:
-            _lf.update_current_generation(
-                model=request.model,
-                model_parameters={"temperature": request.temperature, "max_tokens": request.max_tokens},
-                input=self._build_messages(request),
-            )
-
         async def _call():
             try:
                 import openai as _openai
@@ -88,14 +78,6 @@ class OpenAIProvider(BaseProvider):
                         "completion_tokens": result.usage.completion_tokens if result.usage else None,
                     },
                 )
-                if _lf:
-                    _lf.update_current_generation(
-                        output=result.content,
-                        usage_details={
-                            "input": result.usage.prompt_tokens if result.usage else 0,
-                            "output": result.usage.completion_tokens if result.usage else 0,
-                        },
-                    )
                 return result
             except KeyError:
                 logger.exception("Missing API key or config", extra={"provider": "openai"})

@@ -24,7 +24,6 @@ if TYPE_CHECKING:
 import logging
 import asyncio
 
-from llmx.observability import observe, lf
 
 logger = logging.getLogger(__name__)
 
@@ -61,16 +60,7 @@ class GeminiProvider(BaseProvider):
 
     #core
 
-    @observe(as_type="generation", name="gemini.generate")
     async def generate(self, request: GenerateRequest) -> GenerateResponse:
-        _lf = lf()
-        if _lf:
-            _lf.update_current_generation(
-                model=request.model,
-                model_parameters={"temperature": request.temperature, "max_tokens": request.max_tokens},
-                input=[{"role": m.role, "content": m.content} for m in request.messages],
-            )
-
         async def _call():
             try:
                 from google.api_core import exceptions as _gexc
@@ -90,8 +80,6 @@ class GeminiProvider(BaseProvider):
                     "generate completed",
                     extra={"provider": "gemini", "model": model_name},
                 )
-                if _lf:
-                    _lf.update_current_generation(output=result.content)
                 return result
             except ValueError:
                 logger.exception("Invalid Gemini request", extra={"provider": "gemini", "model": request.model})
