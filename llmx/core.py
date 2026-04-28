@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import nullcontext
 from typing import Iterator, AsyncIterator
 
 logger = logging.getLogger(__name__)
@@ -16,6 +17,7 @@ from llmx.providers.base import BaseProvider
 from llmx.providers import load_provider
 from llmx.config import LLMClientConfig
 from llmx.exceptions import LLMXError, InvalidRequestError
+from llmx.observability import observe, lf
 from dotenv import load_dotenv
 
 _dotenv_loaded = False
@@ -141,6 +143,7 @@ class LLMClient:
 
     # async
 
+    @observe(name="llmx.generate")
     async def agenerate(
         self,
         prompt: str | list[Message] | GenerateRequest,
@@ -164,10 +167,11 @@ class LLMClient:
             )
 
             provider = self._resolve(request.model)
+            provider_name = self.provider_name or type(provider).__name__
             logger.debug(
                 "generate request",
                 extra={
-                    "provider": self.provider_name or type(provider).__name__,
+                    "provider": provider_name,
                     "model": request.model,
                     "temperature": request.temperature,
                     "max_tokens": request.max_tokens,
@@ -175,10 +179,52 @@ class LLMClient:
                 },
             )
 
-            result = provider.generate(request)
+            _lf = lf()
+            if _lf:
+                _lf.set_current_trace_io(
+                    input=[{"role": m.role, "content": m.content} for m in request.messages],
+                )
+                _lf.update_current_span(
+                    metadata={
+                        "provider": provider_name,
+                        "temperature": request.temperature,
+                        "max_tokens": request.max_tokens,
+                    },
+                )
 
-            if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
-                return await result
+            gen_input = (
+                ([{"role": "system", "content": request.system}] if request.system else [])
+                + [{"role": m.role, "content": m.content} for m in request.messages]
+            )
+            gen_ctx = (
+                _lf.start_as_current_observation(
+                    as_type="generation",
+                    name=f"{provider_name}.generate",
+                    model=request.model,
+                    model_parameters={
+                        "temperature": request.temperature,
+                        "max_tokens": request.max_tokens,
+                    },
+                    input=gen_input,
+                )
+                if _lf else nullcontext()
+            )
+
+            with gen_ctx:
+                result = provider.generate(request)
+                if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
+                    result = await result
+                if _lf:
+                    _lf.update_current_generation(
+                        output=result.content,
+                        usage_details={
+                            "input": result.usage.prompt_tokens if result.usage else 0,
+                            "output": result.usage.completion_tokens if result.usage else 0,
+                        },
+                    )
+
+            if _lf:
+                _lf.set_current_trace_io(output=result.content)
 
             return result
 
