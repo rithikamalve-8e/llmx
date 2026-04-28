@@ -19,6 +19,7 @@ from llmx.exceptions import (
     ContextLengthExceededError,
     QuotaExceededError,
 )
+from llmx.observability import lf
 
 if TYPE_CHECKING:
     from llmx.config import LLMClientConfig
@@ -113,6 +114,18 @@ class BaseProvider(ABC):
                     "exc_msg": str(last_exc),
                 },
             )
+
+            _lf = lf()
+            if _lf:
+                try:
+                    _lf.update_current_generation(
+                        metadata={
+                            "retry_attempt": attempt + 1,
+                            "retry_error": type(last_exc).__name__,
+                        },
+                    )
+                except Exception:
+                    pass
 
             await asyncio.sleep(delay)
 

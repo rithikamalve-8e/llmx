@@ -16,6 +16,7 @@ from llmx.providers.base import BaseProvider
 from llmx.providers import load_provider
 from llmx.config import LLMClientConfig
 from llmx.exceptions import LLMXError, InvalidRequestError
+from llmx.observability import observe, lf
 from dotenv import load_dotenv
 
 _dotenv_loaded = False
@@ -141,6 +142,7 @@ class LLMClient:
 
     # async
 
+    @observe(name="llmx.generate")
     async def agenerate(
         self,
         prompt: str | list[Message] | GenerateRequest,
@@ -164,10 +166,11 @@ class LLMClient:
             )
 
             provider = self._resolve(request.model)
+            provider_name = self.provider_name or type(provider).__name__
             logger.debug(
                 "generate request",
                 extra={
-                    "provider": self.provider_name or type(provider).__name__,
+                    "provider": provider_name,
                     "model": request.model,
                     "temperature": request.temperature,
                     "max_tokens": request.max_tokens,
@@ -175,10 +178,26 @@ class LLMClient:
                 },
             )
 
+            _lf = lf()
+            if _lf:
+                _lf.set_current_trace_io(
+                    input=[{"role": m.role, "content": m.content} for m in request.messages],
+                )
+                _lf.update_current_span(
+                    metadata={
+                        "provider": provider_name,
+                        "temperature": request.temperature,
+                        "max_tokens": request.max_tokens,
+                    },
+                )
+
             result = provider.generate(request)
 
             if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
-                return await result
+                result = await result
+
+            if _lf:
+                _lf.set_current_trace_io(output=result.content)
 
             return result
 
